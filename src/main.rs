@@ -1,3 +1,4 @@
+mod declarative;
 mod tool;
 
 fn main() {
