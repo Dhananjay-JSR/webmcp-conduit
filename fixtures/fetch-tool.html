@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><title>Fetch tool</title></head><body>
+<script>
+  // A tool that calls the site's own backend during execute — the shape that
+  // used to hang, because fetch was an empty shell.
+  document.modelContext.registerTool({
+    name: "load-readme",
+    description: "Fetch a document from this site and report its size",
+    execute: async function () {
+      const res = await fetch("/dynamic-module.js");
+      const text = await res.text();
+      return { status: res.status, bytes: text.length, type: res.headers.get("content-type") };
+    }
+  });
+</script>
+</body></html>

@@ -13,6 +13,7 @@
     "fastestsmallesttextencoderdecoder": "^1.0.22",
     "happy-dom-without-node": "14.12.3",
     "web-streams-polyfill": "^4.3.0",
+    "whatwg-fetch": "^3.6.20",
     "whatwg-url": "^17.1.2"
   }
 }

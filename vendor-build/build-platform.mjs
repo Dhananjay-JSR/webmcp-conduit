@@ -34,4 +34,10 @@ await esbuild.build({
   entryPoints: ['platform-entry.js'],
   outfile: '../src/js/vendor/platform.js',
 });
+
+await esbuild.build({
+  ...common,
+  entryPoints: ['fetch-entry.js'],
+  outfile: '../src/js/vendor/fetch.js',
+});
 console.log('BUILD OK');

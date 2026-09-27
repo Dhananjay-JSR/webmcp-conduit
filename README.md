@@ -108,10 +108,10 @@ Early. The engine works end to end — page scripts execute, tools register,
 `tools/call` mutates real page state that persists across calls. What's missing:
 
 - **Angular and other framework runtimes** are untested; React works.
+- **React Server Components** do not hydrate, so a page whose tools register
+  inside an RSC client component comes up empty.
 - **No layout.** `getBoundingClientRect` returns zeros. A page that gates tool
   registration behind real geometry will come up empty.
-- **`fetch` inside tools.** Tools that call their own backend during `execute`
-  will not settle.
 - **Authenticated sessions.** No cookie jar yet, so logged-in sites see you
   logged out.
 

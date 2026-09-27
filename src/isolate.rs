@@ -26,9 +26,7 @@ use rquickjs::{Context, Ctx, Function, Module, Runtime};
 use std::collections::HashMap;
 use scraper::{Html, Selector};
 use serde::Deserialize;
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Host-owned decisions: virtual-clock timers, console bridging, diagnostics.
 const HOST_PRE_JS: &str = include_str!("js/host-pre.js");
@@ -45,6 +43,12 @@ const PLATFORM_JS: &str = include_str!("js/vendor/platform.js");
 const HAPPY_DOM_JS: &str = include_str!("js/vendor/happy-dom.js");
 /// Constructs the Window and hoists it onto globalThis.
 const HOST_POST_JS: &str = include_str!("js/host-post.js");
+/// XMLHttpRequest, backed by the host — the network boundary is ours.
+const HOST_FETCH_JS: &str = include_str!("js/host-fetch.js");
+/// Spec types for fetch: Headers, Request, Response. Loaded after host-post
+/// because happy-dom-without-node ships them as empty shells and hoisting puts
+/// those on globalThis first.
+const FETCH_JS: &str = include_str!("js/vendor/fetch.js");
 /// document.modelContext, per the W3C IDL.
 const SHIM_JS: &str = include_str!("js/shim.js");
 
@@ -157,6 +161,77 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
     }
 
     (scripts, external)
+}
+
+
+/// Perform one HTTP request on behalf of the page.
+///
+/// The same origin policy that governs script loading governs this: a page's
+/// own backend is reachable, an arbitrary third party is not. A blocked
+/// request comes back as a structured error rather than an exception, so the
+/// page sees a normal network failure and conduit records why.
+fn http_request(
+    page_origin: &str,
+    method: &str,
+    url: &str,
+    headers_json: &str,
+    body: &str,
+) -> String {
+    let fail = |msg: String| json!({"error": msg}).to_string();
+
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => return fail(format!("invalid URL {url}: {e}")),
+    };
+    if !crate::fetch::origin_allowed(&parsed, page_origin) {
+        return fail(format!(
+            "cross-origin request blocked: {url} (page origin {page_origin})"
+        ));
+    }
+
+    let mut req = ureq::request(method, parsed.as_str())
+        .timeout(std::time::Duration::from_secs(15));
+
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(headers_json) {
+        for (k, v) in map {
+            if let Some(val) = v.as_str() {
+                req = req.set(&k, val);
+            }
+        }
+    }
+
+    let sent = if body.is_empty() {
+        req.call()
+    } else {
+        req.send_string(body)
+    };
+
+    // An HTTP error status is a normal response to a page, not a failure.
+    let resp = match sent {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => return fail(format!("{e}")),
+    };
+
+    let status = resp.status();
+    let status_text = resp.status_text().to_string();
+    let final_url = resp.get_url().to_string();
+    let mut headers = serde_json::Map::new();
+    for name in resp.headers_names() {
+        if let Some(v) = resp.header(&name) {
+            headers.insert(name.to_lowercase(), json!(v));
+        }
+    }
+    let text = resp.into_string().unwrap_or_default();
+
+    json!({
+        "status": status,
+        "statusText": status_text,
+        "url": final_url,
+        "headers": serde_json::Value::Object(headers),
+        "body": text,
+    })
+    .to_string()
 }
 
 /// Unhandled promise rejections, captured out of QuickJS itself.
@@ -348,7 +423,7 @@ impl Page {
         );
 
         let ctx = Context::full(&rt).context("creating QuickJS context")?;
-        let _origin = url.origin().ascii_serialization();
+        let origin = url.origin().ascii_serialization();
 
         let diagnostics = Diagnostics {
             scripts_total: scripts.len(),
@@ -410,6 +485,24 @@ impl Page {
             }
             ctx.eval::<(), _>(HOST_POST_JS)
                 .map_err(|e| anyhow!("host-post.js: {}", describe_exception(&ctx, &e.to_string())))?;
+
+            // Network transport. Synchronous on purpose: conduit harvests a
+            // page rather than driving a live one, so there is nothing to
+            // interleave with, and a blocking call keeps the whole engine
+            // single-threaded and free of a second async runtime.
+            let page_origin = origin.clone();
+            let http = Function::new(
+                ctx.clone(),
+                move |method: String, url: String, headers_json: String, body: String| -> String {
+                    http_request(&page_origin, &method, &url, &headers_json, &body)
+                },
+            )?;
+            ctx.globals().set("__conduit_http", http)?;
+
+            ctx.eval::<(), _>(HOST_FETCH_JS)
+                .map_err(|e| anyhow!("host-fetch.js: {}", describe_exception(&ctx, &e.to_string())))?;
+            ctx.eval::<(), _>(FETCH_JS)
+                .map_err(|e| anyhow!("fetch.js: {}", describe_exception(&ctx, &e.to_string())))?;
 
             // Let happy-dom parse the document. It is a real HTML parser, so
             // this is more faithful than any tree we could hand it.
@@ -903,6 +996,42 @@ mod tests {
         assert_eq!(
             page.eval_debug("new URL('https://a.example/p?q=1').searchParams.get('q')").unwrap(),
             "1"
+        );
+    }
+
+    #[test]
+    fn fetch_is_real_not_a_shell() {
+        // happy-dom-without-node ships fetch, Headers, Request and Response as
+        // empty shells — Headers.prototype carries only `constructor`. A page
+        // reading a header then dies with "not a function" inside a promise
+        // nobody is listening to, which is invisible.
+        let page = load_fixture();
+        assert_eq!(page.eval_debug("typeof fetch").unwrap(), "function");
+        assert_eq!(page.eval_debug("typeof new Headers().get").unwrap(), "function");
+        assert_eq!(
+            page.eval_debug("new Headers({'x-a': '1'}).get('x-a')").unwrap(),
+            "1"
+        );
+        assert_eq!(page.eval_debug("typeof new Request('https://a.example/').url").unwrap(), "string");
+        assert_eq!(page.eval_debug("new Response('hi').status").unwrap(), "200");
+    }
+
+    #[test]
+    fn cross_origin_requests_are_blocked() {
+        // The network boundary carries the same origin policy as script
+        // loading: a page's own backend is reachable, an arbitrary third
+        // party is not.
+        let out = http_request(
+            "https://app.example",
+            "GET",
+            "https://evil.example/exfiltrate",
+            "{}",
+            "",
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("blocked"),
+            "expected a block, got {out}"
         );
     }
 

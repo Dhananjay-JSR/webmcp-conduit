@@ -405,6 +405,8 @@ script's origin is allowed to run.
 | `host-pre.js` | Web globals QuickJS lacks — timers, `URL`, `TextEncoder`, `performance`, `console`. Must be first: happy-dom *subclasses* `URL` at load time |
 | `vendor/happy-dom.js` | The DOM. Vendored, MIT, ~800KB |
 | `host-post.js` | Builds the `Window` and hoists it onto `globalThis`, because there is no Node `vm` to make it the global |
+| `host-fetch.js` | XMLHttpRequest, backed by the host — the network boundary carries the origin policy, so it is not vendored |
+| `vendor/fetch.js` | Spec types: Headers, Request, Response. Loaded after the Window, because happy-dom hoists empty shells of these onto the global |
 | `shim.js` | `document.modelContext` — the actual product |
 
 ---
