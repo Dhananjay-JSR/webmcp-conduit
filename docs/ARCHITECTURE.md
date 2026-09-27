@@ -283,7 +283,165 @@ npm at compile time, so `cargo install` needs no Node toolchain — see
 
 ---
 
-## 9. What this is not
+## 9. How the CLI actually talks to a client
+
+**There is no port.** conduit is not a server you connect to over the network —
+the MCP client *launches it as a child process* and talks to it over stdin and
+stdout. That is the `stdio` transport.
+
+```mermaid
+flowchart LR
+    subgraph proc["MCP client process"]
+        CL["Claude Code / Cursor"]
+    end
+    subgraph child["conduit — child process"]
+        IN["stdin"] --> LOOP["serve loop"]
+        LOOP --> OUT["stdout"]
+        LOOP -.-> ERR["stderr"]
+    end
+
+    CL -->|"spawns: conduit serve URL"| child
+    CL -->|"JSON-RPC request n"| IN
+    OUT -->|"JSON-RPC response n"| CL
+    ERR -.->|"logs, never parsed"| CL
+
+    style child fill:#1f2937,color:#fff
+    style ERR fill:#7c2d12,color:#fff
+```
+
+Three rules follow from this, and breaking any of them breaks the client:
+
+1. **stdout is the transport.** One JSON object per line, newline-delimited.
+   A stray `println!` corrupts the stream.
+2. **stderr is for humans.** All logging goes there. `CONDUIT_LOG=debug` turns
+   up the volume, including the page's own `console` output.
+3. **Notifications get no reply.** A JSON-RPC message with no `id` is a
+   notification; answering it is a protocol error.
+
+The client config is just a command line:
+
+```json
+{ "mcpServers": { "todo": { "command": "conduit", "args": ["serve", "https://todo.example"] } } }
+```
+
+### The actual bytes
+
+Request in:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"local__add-todo","arguments":{"text":"milk"}}}
+```
+
+Response out:
+
+```json
+{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"added\":\"milk\",\"count\":2}",
+ "type":"text"}],"isError":false}}
+```
+
+Note the double encoding: `content[0].text` is itself a JSON *string*, because
+the WebMCP IDL says `executeTool()` resolves to a `DOMString`. conduit passes
+that through verbatim rather than re-parsing and re-shaping it.
+
+### Methods handled
+
+| Method | What conduit does |
+|---|---|
+| `initialize` | Declares protocol version, capabilities, and an `instructions` string naming the site and which engine served it |
+| `tools/list` | Returns the merged L0 + L1 tool list, host-prefixed |
+| `tools/call` | Routes to the isolate or to an HTTP form submission |
+| `ping` | Empty result |
+| anything else | `-32601 method not found` — unless it is a notification, which is ignored |
+
+A **failing tool is not a protocol error**. It comes back as a normal result
+with `isError: true`, so the model sees what went wrong and can adapt instead
+of the transport falling over.
+
+---
+
+## 10. What each module does
+
+Section 8 shows how they depend on each other; this is what each is *for*.
+
+**`main.rs`** — the CLI surface. Two commands, `probe` and `serve`, plus flags
+(`--json`, `--no-scripts`, `--eval`). It also pins the async runtime to a
+*single thread*: QuickJS values are not `Send`, so the page and everything
+touching it must stay on one thread.
+
+**`mcp.rs`** — the centre of gravity, and where the project's point lives. Two
+halves:
+- `Session::load()` resolves the target (URL or local file), runs L0, runs L1,
+  merges both tool sets, and builds a routing table from prefixed MCP name to
+  either `Source::Page` or `Source::Form`.
+- `serve()` is the read-a-line, dispatch, write-a-line loop.
+
+**`tool.rs`** — the vocabulary. `WebTool` is a discovered tool regardless of
+tier; `to_mcp()` renders it for `tools/list`; `to_mcp_result()` wraps a raw
+result and applies the untrusted-content fence. Also the naming rules:
+`host_prefix()` and `mcp_tool_name()`.
+
+**`declarative.rs`** — L0. `extract()` finds `<form toolname>` elements and
+compiles their controls into a JSON Schema, keeping hidden fields out of the
+model-facing schema while carrying them into the submission.
+
+**`isolate.rs`** — L1, and the largest module. Builds the QuickJS runtime,
+evaluates the four JS layers in order, runs page scripts, and exposes three
+operations to the session: `harvest()`, `call()` and `eval_debug()`. `settle()`
+lives here too.
+
+**`modules.rs`** — ES module support. `import_specifiers()` scans a source for
+what it imports; `prefetch_graph()` walks and fetches the whole graph. Separate
+from `isolate.rs` because it is pure I/O and pure text, and testable as such.
+
+**`fetch.rs`** — HTTP, and the two policy decisions that belong at the
+transport: whether the site sent `Permissions-Policy: tools=()`, and whether a
+script's origin is allowed to run.
+
+### The JS layers, in load order
+
+| File | Why it exists |
+|---|---|
+| `host-pre.js` | Web globals QuickJS lacks — timers, `URL`, `TextEncoder`, `performance`, `console`. Must be first: happy-dom *subclasses* `URL` at load time |
+| `vendor/happy-dom.js` | The DOM. Vendored, MIT, ~800KB |
+| `host-post.js` | Builds the `Window` and hoists it onto `globalThis`, because there is no Node `vm` to make it the global |
+| `shim.js` | `document.modelContext` — the actual product |
+
+---
+
+## 11. One request, end to end
+
+What happens on `conduit serve https://shop.example`, in code:
+
+```
+main.rs         parse argv -> Command::Serve
+mcp.rs          Session::load("https://shop.example", allow_scripts: true)
+  fetch.rs        page()            GET, and reject if tools=() is set
+  declarative.rs  extract()         L0 tools from <form toolname>
+  isolate.rs      collect_script_refs()
+  fetch.rs        script()          external scripts, same-origin + CDNs
+  modules.rs      prefetch_graph()  the whole import graph, up front
+  isolate.rs      Page::load()      host-pre, happy-dom, host-post, HTML, shim
+                                    then scripts, then ready events
+  isolate.rs      harvest()         read back what registered
+  tool.rs         to_mcp()          render each for tools/list
+mcp.rs          serve()             loop on stdin
+
+  ... client sends tools/call ...
+
+mcp.rs          route by prefixed name
+  isolate.rs      Page::call()      __conduit_run, settle, read result
+  tool.rs         to_mcp_result()   wrap, fence if untrusted
+mcp.rs          write one line to stdout
+```
+
+`probe` is the same path minus `serve()` — it loads a session and prints what
+it found rather than waiting on stdin. That is deliberate: **the thing you
+diagnose is the thing that runs.**
+
+---
+
+## 12. What this is not
 
 conduit is **not a browser**. happy-dom gives it a real DOM, but there is no
 layout engine and no rendering: `getBoundingClientRect` returns zeros.
