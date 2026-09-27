@@ -95,6 +95,99 @@
     return ran;
   };
 
+  // --------------------------------------------------- task scheduling
+  // MessageChannel is how React's scheduler yields between units of work; it
+  // reaches for this before falling back to setTimeout. happy-dom provides
+  // MessagePort but not the channel that pairs two of them.
+  //
+  // This belongs here rather than in a vendored package because it is pure
+  // scheduling, and scheduling is already host-owned: delivery goes through
+  // the same virtual clock as the timers above, so a page that yields a
+  // thousand times costs no wall time.
+  if (typeof globalThis.MessageChannel === "undefined") {
+    function Port() {
+      this.onmessage = null;
+      this._peer = null;
+      this._listeners = [];
+    }
+    Port.prototype.addEventListener = function (type, fn) {
+      if (type === "message" && fn) this._listeners.push(fn);
+    };
+    Port.prototype.removeEventListener = function (type, fn) {
+      this._listeners = this._listeners.filter(function (f) { return f !== fn; });
+    };
+    Port.prototype.postMessage = function (data) {
+      var peer = this._peer;
+      if (!peer) return;
+      globalThis.setTimeout(function () {
+        var ev = { type: "message", data: data, target: peer, source: null };
+        if (typeof peer.onmessage === "function") {
+          try { peer.onmessage(ev); } catch (e) { globalThis.__conduit_report_error(e); }
+        }
+        peer._listeners.slice().forEach(function (f) {
+          try { f(ev); } catch (e) { globalThis.__conduit_report_error(e); }
+        });
+      }, 0);
+    };
+    Port.prototype.start = function () {};
+    Port.prototype.close = function () { this._peer = null; };
+
+    globalThis.MessageChannel = function MessageChannel() {
+      this.port1 = new Port();
+      this.port2 = new Port();
+      this.port1._peer = this.port2;
+      this.port2._peer = this.port1;
+    };
+  }
+
+  // Frameworks schedule low-priority work here and never run it otherwise.
+  if (typeof globalThis.requestIdleCallback !== "function") {
+    globalThis.requestIdleCallback = function (fn) {
+      return globalThis.setTimeout(function () {
+        fn({ didTimeout: false, timeRemaining: function () { return 50; } });
+      }, 1);
+    };
+    globalThis.cancelIdleCallback = function (id) { globalThis.clearTimeout(id); };
+  }
+
+  // ------------------------------------------------------------- crypto
+  // QuickJS has no Web Crypto. A local-first app mints ids with
+  // crypto.randomUUID before it can persist anything, so without this it
+  // renders a "save issue" and never gets as far as registering its tools.
+  //
+  // The entropy comes from the host, which is the only place that has any.
+  if (typeof globalThis.crypto === "undefined") {
+    function fill(arr) {
+      var bytes = globalThis.__conduit_random_bytes(arr.length);
+      for (var i = 0; i < arr.length; i++) arr[i] = bytes[i];
+      return arr;
+    }
+    globalThis.crypto = {
+      getRandomValues: function (arr) {
+        if (!arr || typeof arr.length !== "number") {
+          throw new TypeError("getRandomValues expects a typed array");
+        }
+        return fill(arr);
+      },
+      randomUUID: function () {
+        var b = globalThis.__conduit_random_bytes(16);
+        // RFC 4122 version 4, variant 1.
+        b[6] = (b[6] & 15) | 64;
+        b[8] = (b[8] & 63) | 128;
+        var hex = [];
+        for (var i = 0; i < 16; i++) {
+          hex.push((b[i] + 256).toString(16).slice(1));
+        }
+        return (
+          hex.slice(0, 4).join("") + "-" + hex.slice(4, 6).join("") + "-" +
+          hex.slice(6, 8).join("") + "-" + hex.slice(8, 10).join("") + "-" +
+          hex.slice(10, 16).join("")
+        );
+      },
+      subtle: {},
+    };
+  }
+
   // ------------------------------------------------------------- performance
   var t0 = Date.now();
   if (typeof globalThis.performance === "undefined") {

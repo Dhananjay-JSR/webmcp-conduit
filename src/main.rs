@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     // to turn logging up.
     let filter = match std::env::var("CONDUIT_LOG") {
         Ok(v) if v.contains('=') => v,
-        Ok(v) if !v.trim().is_empty() => format!("conduit={v},page={v}"),
+        Ok(v) if !v.trim().is_empty() => format!("conduit={v},page={v},http={v}"),
         _ => "warn".to_string(),
     };
     tracing_subscriber::fmt()

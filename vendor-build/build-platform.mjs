@@ -40,4 +40,16 @@ await esbuild.build({
   entryPoints: ['fetch-entry.js'],
   outfile: '../src/js/vendor/fetch.js',
 });
+
+await esbuild.build({
+  ...common,
+  entryPoints: ['intl-entry.js'],
+  outfile: '../src/js/vendor/intl.js',
+});
+
+await esbuild.build({
+  ...common,
+  entryPoints: ['storage-entry.js'],
+  outfile: '../src/js/vendor/storage.js',
+});
 console.log('BUILD OK');

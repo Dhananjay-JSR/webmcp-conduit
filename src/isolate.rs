@@ -45,6 +45,11 @@ const HAPPY_DOM_JS: &str = include_str!("js/vendor/happy-dom.js");
 const HOST_POST_JS: &str = include_str!("js/host-post.js");
 /// XMLHttpRequest, backed by the host — the network boundary is ours.
 const HOST_FETCH_JS: &str = include_str!("js/host-fetch.js");
+/// Intl. QuickJS ships none at all, and Intl.Segmenter is what a text editor
+/// reaches for to find grapheme and word boundaries.
+const INTL_JS: &str = include_str!("js/vendor/intl.js");
+/// IndexedDB, in memory. A local-first app cannot boot without it.
+const STORAGE_JS: &str = include_str!("js/vendor/storage.js");
 /// Spec types for fetch: Headers, Request, Response. Loaded after host-post
 /// because happy-dom-without-node ships them as empty shells and hoisting puts
 /// those on globalThis first.
@@ -216,6 +221,16 @@ fn http_request(
         req.send_string(body)
     };
 
+    tracing::debug!(
+        target: "http",
+        "{method} {url} -> {}",
+        match &sent {
+            Ok(r) => format!("{}", r.status()),
+            Err(ureq::Error::Status(c, _)) => format!("{c}"),
+            Err(e) => format!("error: {e}"),
+        }
+    );
+
     // An HTTP error status is a normal response to a page, not a failure.
     let resp = match sent {
         Ok(r) => r,
@@ -312,18 +327,47 @@ unsafe extern "C" fn on_promise_rejection(
 struct RecordingLoader {
     inner: BuiltinLoader,
     misses: Rc<RefCell<Vec<String>>>,
+    origin: String,
 }
 
 impl Loader for RecordingLoader {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<JsModule<'js, Declared>> {
-        match self.inner.load(ctx, name) {
-            Ok(m) => Ok(m),
-            Err(e) => {
+        if let Ok(m) = self.inner.load(ctx, name) {
+            return Ok(m);
+        }
+
+        // Not prefetched. Static scanning cannot see every import — a code-split
+        // chunk named only in a runtime manifest, for instance — so fetch it
+        // now. QuickJS resolves synchronously and conduit's HTTP client is
+        // synchronous too, so this is possible here in a way it would not be
+        // in a browser-shaped engine.
+        match fetch_module_sync(&self.origin, name) {
+            Some(source) => {
+                tracing::debug!(target: "http", "lazily fetched module {name}");
+                JsModule::declare(ctx.clone(), name, source)
+            }
+            None => {
                 self.misses.borrow_mut().push(name.to_string());
-                Err(e)
+                Err(rquickjs::Error::new_loading(name))
             }
         }
     }
+}
+
+/// Fetch one module on demand, under the same origin policy as everything else.
+fn fetch_module_sync(page_origin: &str, name: &str) -> Option<String> {
+    let url = url::Url::parse(name).ok()?;
+    if !crate::fetch::origin_allowed(&url, page_origin) {
+        return None;
+    }
+    if url.scheme() == "file" {
+        return std::fs::read_to_string(url.to_file_path().ok()?).ok();
+    }
+    let resp = ureq::get(url.as_str())
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .ok()?;
+    resp.into_string().ok()
 }
 
 /// Modules the document declares via `<link rel="modulepreload">`.
@@ -422,6 +466,8 @@ impl Page {
         rt.set_memory_limit(128 * 1024 * 1024);
         rt.set_max_stack_size(1024 * 1024);
 
+        let origin = url.origin().ascii_serialization();
+
         let mut loader = BuiltinLoader::default();
         for (name, source) in &modules {
             loader.add_module(name.clone(), source.clone());
@@ -429,7 +475,11 @@ impl Page {
         let misses: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         rt.set_loader(
             UrlResolver { page: url.to_string() },
-            RecordingLoader { inner: loader, misses: Rc::clone(&misses) },
+            RecordingLoader {
+                inner: loader,
+                misses: Rc::clone(&misses),
+                origin: origin.clone(),
+            },
         );
 
         let ctx = Context::full(&rt).context("creating QuickJS context")?;
@@ -473,6 +523,8 @@ impl Page {
                 .map_err(|e| anyhow!("host-pre.js: {}", describe_exception(&ctx, &e.to_string())))?;
             ctx.eval::<(), _>(ENCODING_JS)
                 .map_err(|e| anyhow!("encoding.js: {}", describe_exception(&ctx, &e.to_string())))?;
+            ctx.eval::<(), _>(INTL_JS)
+                .map_err(|e| anyhow!("intl.js: {}", describe_exception(&ctx, &e.to_string())))?;
             ctx.eval::<(), _>(PLATFORM_JS)
                 .map_err(|e| anyhow!("platform.js: {}", describe_exception(&ctx, &e.to_string())))?;
             ctx.eval::<(), _>(HAPPY_DOM_JS)
@@ -508,6 +560,26 @@ impl Page {
                 },
             )?;
             ctx.globals().set("__conduit_http", http)?;
+
+            // Entropy is a host capability, like timers and the network. The
+            // engine has no RNG of its own, and a page that cannot mint an id
+            // cannot save anything — which is how a local-first app fails.
+            let random = Function::new(ctx.clone(), |n: usize| -> Vec<u8> {
+                let mut buf = vec![0u8; n.min(65536)];
+                if getrandom::fill(&mut buf).is_err() {
+                    // Never silently hand back zeroes; ids would collide.
+                    for (i, b) in buf.iter_mut().enumerate() {
+                        *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+                    }
+                }
+                buf
+            })?;
+            ctx.globals().set("__conduit_random_bytes", random)?;
+
+            // After the Window is hoisted: fake-indexeddb needs DOMException,
+            // which arrives with happy-dom.
+            ctx.eval::<(), _>(STORAGE_JS)
+                .map_err(|e| anyhow!("storage.js: {}", describe_exception(&ctx, &e.to_string())))?;
 
             ctx.eval::<(), _>(HOST_FETCH_JS)
                 .map_err(|e| anyhow!("host-fetch.js: {}", describe_exception(&ctx, &e.to_string())))?;
@@ -645,8 +717,8 @@ impl Page {
     /// work stranded. React in particular will not render until its scheduler
     /// gets a turn through the timer queue.
     fn settle(&mut self) {
-        const ROUNDS: usize = 200;
-        const TIMER_BUDGET: usize = 500;
+        const ROUNDS: usize = 1_000;
+        const TIMER_BUDGET: usize = 1_000;
 
         for _ in 0..ROUNDS {
             self.drain_jobs();
@@ -1104,6 +1176,42 @@ mod tests {
         let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
         assert_eq!(page.diagnostics.register_calls, 0);
         assert!(page.diagnostics.consume_calls > 0, "getTools should count as consumption");
+    }
+
+    #[test]
+    fn the_host_capabilities_a_real_app_needs_are_present() {
+        // Each of these was found by an application failing on it, not by
+        // reading a spec list. Entropy, storage and segmentation are the
+        // three that stop a local-first app before it registers anything.
+        let page = load_fixture();
+        assert_eq!(page.eval_debug("typeof crypto.randomUUID").unwrap(), "function");
+        assert_eq!(page.eval_debug("typeof indexedDB").unwrap(), "object");
+        assert_eq!(page.eval_debug("typeof Intl.Segmenter").unwrap(), "function");
+        assert_eq!(page.eval_debug("typeof MessageChannel").unwrap(), "function");
+
+        // A v4 UUID, and two calls must differ.
+        let a = page.eval_debug("crypto.randomUUID()").unwrap();
+        let b = page.eval_debug("crypto.randomUUID()").unwrap();
+        assert_eq!(a.len(), 36, "got {a}");
+        assert_eq!(&a[14..15], "4", "version nibble: {a}");
+        assert_ne!(a, b, "randomUUID must not repeat");
+    }
+
+    #[test]
+    fn window_self_and_global_are_one_object() {
+        // Pointing window at a separate Window instance creates two global
+        // namespaces: a script doing `self.x = 1` writes to one and a module
+        // reading bare `x` reads the other. That is how React Server
+        // Components lose the payload handed to them by an inline script.
+        let page = load_fixture();
+        assert_eq!(page.eval_debug("window === globalThis").unwrap(), "true");
+        assert_eq!(page.eval_debug("self === globalThis").unwrap(), "true");
+        assert_eq!(page.eval_debug("document.defaultView === globalThis").unwrap(), "true");
+        assert_eq!(
+            page.eval_debug("(function(){ self.__probe = 7; return globalThis.__probe; })()")
+                .unwrap(),
+            "7"
+        );
     }
 
     #[test]

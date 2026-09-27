@@ -2149,6 +2149,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ego-tree",
+ "getrandom 0.4.3",
  "regex",
  "reqwest",
  "rquickjs",

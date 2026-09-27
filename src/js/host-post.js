@@ -48,6 +48,12 @@
     __conduit_report_error: 1, __conduit_run_timers: 1, __conduit_log: 1,
     __CONDUIT_URL__: 1, __HappyWindow: 1, __conduit_window: 1,
     console: 1, globalThis: 1, global: 1,
+    // Scheduling is host-owned and runs on the virtual clock. happy-dom's
+    // equivalents would take the page off it.
+    setTimeout: 1, clearTimeout: 1, setInterval: 1, clearInterval: 1,
+    queueMicrotask: 1, requestAnimationFrame: 1, cancelAnimationFrame: 1,
+    requestIdleCallback: 1, cancelIdleCallback: 1,
+    MessageChannel: 1, MessagePort: 1,
   };
 
   function hoist(source) {
@@ -83,12 +89,24 @@
 
   hoist(win);
 
-  ["window", "self", "top", "parent"].forEach(function (n) {
+  // window, self and globalThis must be the SAME object, as they are in a
+  // browser. Pointing them at happy-dom's Window instance creates two global
+  // namespaces: a script doing `self.x = 1` writes to one, and another script
+  // reading bare `x` reads the other and sees nothing.
+  //
+  // That is not a corner case. Mixing `window.foo` with bare `foo` is
+  // everywhere, and it is how React Server Components hand their payload from
+  // an inline script to the module that hydrates it.
+  ["window", "self", "top", "parent", "frames"].forEach(function (n) {
     try {
       Object.defineProperty(globalThis, n, {
-        value: win, writable: true, configurable: true, enumerable: true,
+        value: globalThis, writable: true, configurable: true, enumerable: true,
       });
-    } catch (e) {}
+    } catch (e) {
+      globalThis.__conduit_note_missing(
+        "cannot alias globalThis." + n + ": " + String((e && e.message) || e)
+      );
+    }
   });
 
   // Make sure the essentials landed, whatever the hoist did or did not reach.
@@ -113,10 +131,16 @@
   force("sessionStorage", win.sessionStorage);
 
   // Frameworks reach the window through the document rather than the global,
-  // e.g. `document.defaultView.history`. happy-dom wires this itself, but
-  // assert it rather than discover later that it is undefined.
-  if (!doc.defaultView) {
-    try { doc.defaultView = win; } catch (e) {}
+  // e.g. `document.defaultView.history`. It has to be the same object the
+  // page sees as `window`, or the two-namespace problem comes back through
+  // the document.
+  try {
+    Object.defineProperty(doc, "defaultView", {
+      get: function () { return globalThis; },
+      configurable: true,
+    });
+  } catch (e) {
+    try { doc.defaultView = globalThis; } catch (e2) {}
   }
 
   // ------------------------------------------------------ instrumentation
