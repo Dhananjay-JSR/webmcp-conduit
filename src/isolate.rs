@@ -770,6 +770,60 @@ mod tests {
     }
 
     #[test]
+    fn the_platform_surface_frameworks_expect_is_present() {
+        // The point of vendoring happy-dom and the platform layer is that this
+        // surface stops being our problem. This test is the tripwire: if a
+        // dependency bump silently drops something, a framework stops booting
+        // and the symptom is an empty tool list with no error at all.
+        let page = load_fixture();
+        let required = [
+            // DOM
+            "Element", "HTMLElement", "Node", "Document", "DocumentFragment",
+            "Text", "Comment", "DOMParser", "MutationObserver", "customElements",
+            "ShadowRoot",
+            // Events
+            "Event", "CustomEvent", "EventTarget", "AbortController",
+            "AbortSignal", "KeyboardEvent", "MouseEvent",
+            // Platform
+            "URL", "URLSearchParams", "TextEncoder", "TextDecoder",
+            "ReadableStream", "structuredClone", "Blob", "FormData",
+            // Network
+            "fetch", "Headers", "Request", "Response", "XMLHttpRequest",
+            // Host-owned
+            "setTimeout", "queueMicrotask", "requestAnimationFrame",
+            "performance", "localStorage", "history", "matchMedia",
+            "getComputedStyle",
+        ];
+
+        let mut missing = Vec::new();
+        for name in required {
+            let kind = page
+                .eval_debug(&format!("typeof globalThis.{name}"))
+                .unwrap_or_else(|_| "error".into());
+            if kind == "undefined" {
+                missing.push(name);
+            }
+        }
+        assert!(missing.is_empty(), "platform surface regressed: {missing:?}");
+    }
+
+    #[test]
+    fn urls_resolve_against_a_base() {
+        // core-js stands in for whatwg-url, which is not constructible under
+        // QuickJS. Relative resolution is the part frameworks and routers
+        // actually depend on.
+        let page = load_fixture();
+        assert_eq!(
+            page.eval_debug("new URL('./y', 'https://a.example/x/z').href").unwrap(),
+            "https://a.example/x/y"
+        );
+        assert_eq!(
+            page.eval_debug("new URL('https://a.example/p?q=1').searchParams.get('q')").unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
     fn unknown_tools_fail_cleanly() {
         let mut page = load_fixture();
         let err = page.call("no-such-tool", &json!({})).unwrap_err();
