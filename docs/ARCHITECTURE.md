@@ -18,7 +18,7 @@ flowchart LR
         M["MCP server<br/>JSON-RPC / stdio"]
         S["Session<br/>routing + namespacing"]
         L0["L0 static<br/>HTML parse"]
-        L1["L1 isolate<br/>QuickJS + micro-DOM"]
+        L1["L1 isolate<br/>QuickJS + happy-dom"]
     end
 
     subgraph web["The website"]
@@ -101,8 +101,10 @@ sequenceDiagram
 
     Note over CLI,QJS: QuickJS resolves imports synchronously<br/>and cannot await — so the whole graph<br/>must be in hand before evaluation.
 
-    CLI->>QJS: Inject serialized DOM tree
-    CLI->>QJS: eval dom.js — the micro-DOM
+    CLI->>QJS: eval host-pre.js — timers, URL, TextEncoder
+    CLI->>QJS: eval happy-dom — the DOM
+    CLI->>QJS: eval host-post.js — build Window, hoist to global
+    CLI->>QJS: happy-dom parses the HTML
     CLI->>QJS: eval shim.js — document.modelContext
 
     CLI->>Page: Run classic scripts
@@ -254,29 +256,40 @@ flowchart TD
     iso["isolate.rs<br/>L1: QuickJS driver"]
     mod_["modules.rs<br/>ES module graph"]
     fetch["fetch.rs<br/>HTTP, opt-out, CDN policy"]
-    dom["js/dom.js<br/>micro-DOM + instrumentation"]
+    pre["js/host-pre.js<br/>timers, URL, console"]
+    happy["js/vendor/happy-dom.js<br/>the DOM (MIT, vendored)"]
+    post["js/host-post.js<br/>Window + global hoist"]
     shim["js/shim.js<br/>document.modelContext"]
 
     main --> mcp
     mcp --> dec & iso & tool & fetch
     iso --> mod_ & tool
-    iso -.->|include_str!| dom
+    iso -.->|include_str!| pre
+    iso -.->|include_str!| happy
+    iso -.->|include_str!| post
     iso -.->|include_str!| shim
     mod_ --> fetch
 
-    style dom fill:#854d0e,color:#fff
+    style pre fill:#854d0e,color:#fff
+    style post fill:#854d0e,color:#fff
     style shim fill:#854d0e,color:#fff
+    style happy fill:#3f3f46,color:#fff
 ```
 
-The two JS files are compiled into the binary with `include_str!`, so a single
-static binary carries its own DOM.
+All four JS files are compiled into the binary with `include_str!`, so a single
+static binary carries its own DOM. happy-dom is vendored rather than built from
+npm at compile time, so `cargo install` needs no Node toolchain — see
+`vendor-build/` for how the bundle is regenerated.
 
 ---
 
 ## 9. What this is not
 
-conduit is **not a browser**. No layout, no rendering, no canvas.
-`getBoundingClientRect` returns zeros; observers construct but stay inert.
+conduit is **not a browser**. happy-dom gives it a real DOM, but there is no
+layout engine and no rendering: `getBoundingClientRect` returns zeros.
+
+Writing the DOM by hand was the earlier approach and it was a treadmill —
+every new site found a new gap, and none of that work was about WebMCP.
 
 Rather than paper over that, every platform API a page reaches for and does not
 find is **recorded and reported**:

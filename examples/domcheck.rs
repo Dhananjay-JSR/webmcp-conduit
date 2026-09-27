@@ -32,6 +32,8 @@ fn main() {
             globalThis.clearTimeout = globalThis.clearTimeout || function(){};
             globalThis.setInterval = globalThis.setInterval || function(){ return 0; };
             globalThis.clearInterval = globalThis.clearInterval || function(){};
+            globalThis.setImmediate = globalThis.setImmediate || function(f){ return globalThis.setTimeout(f, 0); };
+            globalThis.clearImmediate = globalThis.clearImmediate || function(id){ return globalThis.clearTimeout(id); };
             globalThis.queueMicrotask = globalThis.queueMicrotask || function(f){ Promise.resolve().then(f); };
             if (typeof TextEncoder === 'undefined') {
                 globalThis.TextEncoder = function(){
@@ -44,6 +46,66 @@ fn main() {
                 };
             }
             if (typeof Event === 'undefined') { globalThis.Event = function(t){ this.type = t; }; }
+            // QuickJS has no URL/URLSearchParams, and happy-dom subclasses URL.
+            if (typeof URLSearchParams === 'undefined') {
+                globalThis.URLSearchParams = class URLSearchParams {
+                    constructor(init) { this._p = [];
+                        if (typeof init === 'string') { var q = init[0]==='?'?init.slice(1):init;
+                            if (q) q.split('&').forEach(function(kv){ if(!kv) return; var i=kv.indexOf('=');
+                                var k = i<0?kv:kv.slice(0,i), v = i<0?'':kv.slice(i+1);
+                                this._p.push([decodeURIComponent(k.replace(/\+/g,' ')), decodeURIComponent(v.replace(/\+/g,' '))]); }, this); }
+                        else if (init && typeof init === 'object') { for (var k in init) this._p.push([k, String(init[k])]); } }
+                    get(k){ for (var i=0;i<this._p.length;i++) if(this._p[i][0]===k) return this._p[i][1]; return null; }
+                    getAll(k){ return this._p.filter(e=>e[0]===k).map(e=>e[1]); }
+                    has(k){ return this.get(k) !== null; }
+                    append(k,v){ this._p.push([String(k),String(v)]); }
+                    set(k,v){ this.delete(k); this._p.push([String(k),String(v)]); }
+                    delete(k){ this._p = this._p.filter(e=>e[0]!==k); }
+                    forEach(f,t){ this._p.forEach(e=>f.call(t,e[1],e[0],this)); }
+                    keys(){ return this._p.map(e=>e[0])[Symbol.iterator](); }
+                    values(){ return this._p.map(e=>e[1])[Symbol.iterator](); }
+                    entries(){ return this._p.map(e=>[e[0],e[1]])[Symbol.iterator](); }
+                    [Symbol.iterator](){ return this.entries(); }
+                    toString(){ return this._p.map(e=>encodeURIComponent(e[0])+'='+encodeURIComponent(e[1])).join('&'); }
+                };
+            }
+            if (typeof URL === 'undefined') {
+                var RE = /^([a-zA-Z][a-zA-Z0-9+.-]*:)\/\/([^\/?#:]*)(?::(\d+))?([^?#]*)(\?[^#]*)?(#.*)?$/;
+                globalThis.URL = class URL {
+                    constructor(input, base) {
+                        var href = String(input);
+                        if (base && !RE.test(href)) {
+                            var b = String(base).replace(/[?#].*$/, '');
+                            if (href[0] === '/') { var m0 = RE.exec(b); href = m0 ? m0[1]+'//'+m0[2]+(m0[3]?':'+m0[3]:'')+href : href; }
+                            else href = b.replace(/\/[^\/]*$/, '/') + href;
+                        }
+                        var m = RE.exec(href);
+                        if (!m) {
+                            // Opaque schemes: about:blank, data:, blob:, javascript:
+                            var op = /^([a-zA-Z][a-zA-Z0-9+.-]*:)([^#]*)(#.*)?$/.exec(href);
+                            if (!op) throw new TypeError('Invalid URL: ' + input);
+                            this.href = href; this.protocol = op[1]; this.hostname = '';
+                            this.port = ''; this.host = ''; this.pathname = op[2] || '';
+                            this.search = ''; this.hash = op[3] || ''; this.origin = 'null';
+                            this.username = ''; this.password = '';
+                            this.searchParams = new globalThis.URLSearchParams('');
+                            return;
+                        }
+                        this.href = href; this.protocol = m[1]; this.hostname = m[2];
+                        this.port = m[3] || ''; this.host = m[2] + (m[3] ? ':'+m[3] : '');
+                        this.pathname = m[4] || '/'; this.search = m[5] || ''; this.hash = m[6] || '';
+                        this.origin = m[1] + '//' + this.host;
+                        this.username = ''; this.password = '';
+                        this.searchParams = new globalThis.URLSearchParams(this.search);
+                    }
+                    toString(){ return this.href; }
+                    toJSON(){ return this.href; }
+                };
+            }
+            if (typeof Buffer === 'undefined') {
+                globalThis.Buffer = { from: () => ({}), isBuffer: () => false,
+                                      alloc: () => ({}), concat: () => ({}), byteLength: () => 0 };
+            }
             if (typeof performance === 'undefined') {
                 var __t0 = Date.now();
                 globalThis.performance = { now: function(){ return Date.now() - __t0; },

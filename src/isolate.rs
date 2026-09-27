@@ -6,22 +6,34 @@
 //! state, so there is nothing in the HTML to parse. See `declarative.rs` for
 //! the tier that genuinely needs no execution.
 //!
-//! What this is not: a browser. There is no layout, no rendering, no network
-//! by default. Rather than pretend otherwise, every unimplemented platform API
-//! a page reaches for is recorded and reported by `probe`, so the gap between
-//! this and a real browser is measured instead of guessed.
+//! The DOM is happy-dom, bundled into the binary — writing one by hand is a
+//! treadmill where every new site finds a new gap. What remains ours is the
+//! glue QuickJS does not provide: timers on a virtual clock, the web globals
+//! happy-dom loads against, and the WebMCP shim itself.
+//!
+//! What this is not: a browser. There is no layout and no rendering. Rather
+//! than pretend otherwise, the reach for a geometry API is recorded and
+//! reported by `probe`, so the gap is measured instead of guessed.
 
 use crate::tool::{Annotations, WebTool};
 use anyhow::{anyhow, Context as _, Result};
 use rquickjs::loader::{BuiltinLoader, Resolver};
-use rquickjs::function::Rest;
-use rquickjs::{Context, Ctx, Function, Module, Runtime, Type, Value as JsValue};
+use rquickjs::{Context, Ctx, Function, Module, Runtime};
 use std::collections::HashMap;
 use scraper::{Html, Selector};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
-const DOM_JS: &str = include_str!("js/dom.js");
+/// Web globals QuickJS lacks that happy-dom needs at load time.
+const HOST_PRE_JS: &str = include_str!("js/host-pre.js");
+/// happy-dom, bundled. Vendored rather than built from npm so `cargo install`
+/// needs no Node toolchain. See vendor-build/ for how it is produced.
+const HAPPY_DOM_JS: &str = include_str!("js/vendor/happy-dom.js");
+/// Constructs the Window and hoists it onto globalThis.
+const HOST_POST_JS: &str = include_str!("js/host-post.js");
+/// document.modelContext, per the W3C IDL.
 const SHIM_JS: &str = include_str!("js/shim.js");
 
 /// What happened while running a page, beyond the tools themselves.
@@ -40,7 +52,6 @@ pub struct Page {
     ctx: Context,
     _rt: Runtime,
     pub diagnostics: Diagnostics,
-    pub origin: String,
 }
 
 #[derive(Deserialize)]
@@ -128,42 +139,6 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
     (scripts, external)
 }
 
-/// Serialize the parsed document into the compact tree `dom.js` rebuilds.
-pub fn serialize_dom(html: &str) -> Value {
-    let doc = Html::parse_document(html);
-    let root = doc
-        .tree
-        .root()
-        .children()
-        .find(|n| n.value().is_element())
-        .map(|n| node_to_json(n));
-    root.unwrap_or_else(|| json!({"t": "element", "n": "html", "a": {}, "c": []}))
-}
-
-fn node_to_json(node: ego_tree::NodeRef<scraper::node::Node>) -> Value {
-    match node.value() {
-        scraper::node::Node::Element(el) => {
-            let mut attrs = Map::new();
-            for (k, v) in el.attrs() {
-                attrs.insert(k.to_string(), Value::String(v.to_string()));
-            }
-            let children: Vec<Value> = node
-                .children()
-                .filter(|c| c.value().is_element() || c.value().is_text())
-                .map(node_to_json)
-                .collect();
-            json!({
-                "t": "element",
-                "n": el.name(),
-                "a": Value::Object(attrs),
-                "c": children
-            })
-        }
-        scraper::node::Node::Text(t) => json!({"t": "text", "v": t.to_string()}),
-        _ => json!({"t": "text", "v": ""}),
-    }
-}
-
 /// Resolves module specifiers the way the web does: as URLs relative to the
 /// importing module. QuickJS resolves synchronously, so every module in the
 /// graph must already be in the loader's map by this point.
@@ -235,8 +210,7 @@ impl Page {
         rt.set_loader(UrlResolver, loader);
 
         let ctx = Context::full(&rt).context("creating QuickJS context")?;
-        let origin = url.origin().ascii_serialization();
-        let dom = serialize_dom(html);
+        let _origin = url.origin().ascii_serialization();
 
         let diagnostics = Diagnostics {
             scripts_total: scripts.len(),
@@ -245,27 +219,39 @@ impl Page {
 
         ctx.with(|ctx| -> Result<()> {
             let globals = ctx.globals();
-            globals.set("__CONDUIT_DOM__", json_to_js(&ctx, &dom)?)?;
             globals.set("__CONDUIT_URL__", url.as_str())?;
 
-            // A console that actually reaches the operator's stderr, rather
-            // than a black hole — page logs are the fastest way to find out
-            // why a framework gave up.
-            //
-            // Rust takes only a finished string. Formatting lives in JS,
-            // which can tell an Error from a plain object; from here every
-            // non-string argument looks alike. It must also accept *any*
-            // argument type: a binding typed to `String` makes
-            // `console.error(someObject)` throw a conversion error into the
-            // page, which is how instrumentation ends up breaking the very
-            // render it was meant to observe.
+            // Rust takes only a finished string; formatting lives in JS, which
+            // can tell an Error from a plain object. From here every non-string
+            // argument looks alike, and a binding typed to `String` would make
+            // `console.error(someObject)` throw into the page — instrumentation
+            // breaking the very render it was meant to observe.
             let log = Function::new(ctx.clone(), |line: String| {
                 tracing::debug!(target: "page", "{line}");
             })?;
             globals.set("__conduit_log", log)?;
 
-            ctx.eval::<(), _>(DOM_JS).map_err(|e| anyhow!("dom.js: {e}"))?;
-            ctx.eval::<(), _>(SHIM_JS).map_err(|e| anyhow!("shim.js: {e}"))?;
+            // Order matters: happy-dom subclasses URL and reads timers at load
+            // time, so the prelude has to be in place before it evaluates.
+            ctx.eval::<(), _>(HOST_PRE_JS)
+                .map_err(|e| anyhow!("host-pre.js: {}", describe_exception(&ctx, &e.to_string())))?;
+            ctx.eval::<(), _>(HAPPY_DOM_JS)
+                .map_err(|e| anyhow!("happy-dom: {}", describe_exception(&ctx, &e.to_string())))?;
+            ctx.eval::<(), _>(HOST_POST_JS)
+                .map_err(|e| anyhow!("host-post.js: {}", describe_exception(&ctx, &e.to_string())))?;
+
+            // Let happy-dom parse the document. It is a real HTML parser, so
+            // this is more faithful than any tree we could hand it.
+            let load: Function = ctx.globals().get("__conduit_load_html")?;
+            let err: String = load
+                .call((html,))
+                .map_err(|e| anyhow!("parsing document: {}", describe_exception(&ctx, &e.to_string())))?;
+            if !err.is_empty() {
+                return Err(anyhow!("parsing document: {err}"));
+            }
+
+            ctx.eval::<(), _>(SHIM_JS)
+                .map_err(|e| anyhow!("shim.js: {}", describe_exception(&ctx, &e.to_string())))?;
             Ok(())
         })?;
 
@@ -273,7 +259,6 @@ impl Page {
             ctx,
             _rt: rt,
             diagnostics,
-            origin,
         };
 
         // Browsers run classic scripts as they are parsed and defer modules
@@ -515,16 +500,6 @@ impl Page {
     }
 }
 
-/// Move a serde_json value into the JS context via JSON round-trip. Simple and
-/// fast enough: the DOM is serialized once at startup.
-fn json_to_js<'js>(ctx: &rquickjs::Ctx<'js>, v: &Value) -> Result<rquickjs::Value<'js>> {
-    let s = serde_json::to_string(v)?;
-    let parse: Function = ctx.globals().get::<_, rquickjs::Object>("JSON")?.get("parse")?;
-    parse
-        .call::<_, rquickjs::Value>((s,))
-        .map_err(|e| anyhow!("injecting DOM: {e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,10 +562,11 @@ mod tests {
     #[test]
     fn document_exposes_its_window() {
         // Framework runtimes reach the window through the document, e.g.
-        // `document.defaultView.history`.
+        // `document.defaultView.history`. defaultView is happy-dom's Window
+        // instance rather than globalThis, which is the correct relationship.
         let page = load_fixture();
         assert_eq!(
-            page.eval_debug("document.defaultView === globalThis").unwrap(),
+            page.eval_debug("document.defaultView === window").unwrap(),
             "true"
         );
         assert_eq!(

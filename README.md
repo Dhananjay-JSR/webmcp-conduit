@@ -67,14 +67,21 @@ tiered engine instead and tells you which tier answered.
 | Tier | Mechanism | Cost | Finds |
 |------|-----------|------|-------|
 | **L0 static** | HTML parse | ~free | Declarative `<form toolname=...>` tools |
-| **L1 isolate** | QuickJS + a micro-DOM | milliseconds | Imperative `registerTool()` tools |
+| **L1 isolate** | QuickJS + happy-dom | milliseconds | Imperative `registerTool()` tools |
 
 L1 is the interesting one. Imperative tools are registered by *running code* —
 `execute` is a closure over live page state, so there is nothing in the HTML to
-parse. `conduit` executes the page's own scripts in a QuickJS isolate against a
-minimal DOM, then harvests what got registered. The spec explicitly sanctions
-this path: *"In-page agents implemented in JavaScript can observe the tools that
-a page offers by using the ModelContext APIs directly."*
+parse. `conduit` executes the page's own scripts in a QuickJS isolate against
+[happy-dom](https://github.com/capricorn86/happy-dom), then harvests what got
+registered. The spec explicitly sanctions this path: *"In-page agents
+implemented in JavaScript can observe the tools that a page offers by using the
+ModelContext APIs directly."*
+
+The DOM is a real, maintained implementation bundled into the binary rather
+than something hand-written. Writing one yourself is a treadmill: every new
+site finds a new gap, and none of that work is about WebMCP. What stays ours is
+the glue QuickJS does not provide — timers on a virtual clock, the web globals
+happy-dom loads against, and the WebMCP shim itself.
 
 ## What it is not
 
@@ -101,6 +108,8 @@ Early. The engine works end to end — page scripts execute, tools register,
 `tools/call` mutates real page state that persists across calls. What's missing:
 
 - **Angular and other framework runtimes** are untested; React works.
+- **No layout.** `getBoundingClientRect` returns zeros. A page that gates tool
+  registration behind real geometry will come up empty.
 - **`fetch` inside tools.** Tools that call their own backend during `execute`
   will not settle.
 - **Authenticated sessions.** No cookie jar yet, so logged-in sites see you

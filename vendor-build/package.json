@@ -1,0 +1,11 @@
+{
+  "name": "conduit-vendor-build",
+  "private": true,
+  "type": "module",
+  "description": "Regenerates src/js/vendor/happy-dom.js. Not part of the Rust build.",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "happy-dom-without-node": "14.12.3",
+    "esbuild": "^0.25.0"
+  }
+}
