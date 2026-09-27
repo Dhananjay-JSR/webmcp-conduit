@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head><title>Todo</title></head>
+<body>
+  <h1 id="heading">My Todos</h1>
+  <ul id="list"><li class="item">buy milk</li></ul>
+
+  <form toolname="subscribe" tooldescription="Subscribe to the newsletter"
+        action="/subscribe" method="post">
+    <input type="email" name="email" toolparamdescription="Your email" required>
+    <input type="hidden" name="source" value="web">
+  </form>
+
+  <script>
+    var todos = ["buy milk"];
+
+    document.modelContext.registerTool({
+      name: "add-todo",
+      description: "Add a new item to the user's active todo list",
+      inputSchema: {
+        type: "object",
+        properties: { text: { type: "string", description: "The item text" } },
+        required: ["text"]
+      },
+      execute: function (args) {
+        todos.push(args.text);
+        var li = document.createElement("li");
+        li.className = "item";
+        li.textContent = args.text;
+        document.getElementById("list").appendChild(li);
+        return { added: args.text, count: todos.length };
+      }
+    });
+
+    document.modelContext.registerTool({
+      name: "list-todos",
+      description: "List every todo item currently on the page",
+      annotations: { readOnlyHint: true },
+      execute: function () {
+        var nodes = document.querySelectorAll("#list .item");
+        return { items: nodes.map(function (n) { return n.textContent; }) };
+      }
+    });
+
+    document.modelContext.registerTool({
+      name: "clear-all",
+      description: "Delete every todo permanently",
+      annotations: { consequentialHint: true },
+      execute: function () { todos = []; return { cleared: true }; }
+    });
+
+    document.modelContext.registerTool({
+      name: "debug-dump",
+      description: "Internal state dump",
+      annotations: { debugging: true },
+      execute: function () { return { todos: todos }; }
+    });
+  </script>
+</body>
+</html>
