@@ -65,6 +65,7 @@
 
     registerTool(tool, options) {
       var self = this;
+      registerCalls++;
       return new Promise(function (resolve, reject) {
         try {
           if (!tool || typeof tool !== "object") {
@@ -188,14 +189,26 @@
   var origin = (globalThis.location && globalThis.location.origin) || "null";
   var modelContext = new ModelContext(origin);
 
+  // Two counters that turn "no tools found" from a guess into evidence.
+  // Whether the page ever *looked* for modelContext separates a site that
+  // does not use WebMCP from one that does but never finished booting; and
+  // whether registerTool was ever *called* separates never reaching the call
+  // from calling it and having it rejected.
+  var lookups = 0;
+  var registerCalls = 0;
+  globalThis.__conduit_lookups = function () { return lookups; };
+  globalThis.__conduit_register_calls = function () { return registerCalls; };
+
   Object.defineProperty(globalThis.document, "modelContext", {
-    value: modelContext, writable: false, enumerable: true, configurable: true,
+    get: function () { lookups++; return modelContext; },
+    enumerable: true, configurable: true,
   });
   // Deprecated in Chrome 150, still shipped during the origin trial. Pages in
   // the wild feature-detect either one, so provide both.
   try {
     Object.defineProperty(globalThis.navigator, "modelContext", {
-      value: modelContext, writable: false, enumerable: true, configurable: true,
+      get: function () { lookups++; return modelContext; },
+      enumerable: true, configurable: true,
     });
   } catch (e) { /* some navigator implementations are sealed */ }
 

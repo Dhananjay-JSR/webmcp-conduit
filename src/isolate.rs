@@ -67,6 +67,13 @@ pub struct Diagnostics {
     pub scripts_failed: usize,
     /// Modules the page tried to import that were not in the prefetched graph.
     pub unresolved_modules: Vec<String>,
+    /// How many times the page read `document.modelContext`. Zero means the
+    /// page never looked, which is the difference between a site that does not
+    /// use WebMCP and one that does but never finished booting.
+    pub model_context_lookups: usize,
+    /// How many times `registerTool` was called, including calls that were
+    /// then rejected.
+    pub register_calls: usize,
 }
 
 pub struct Page {
@@ -234,16 +241,16 @@ fn http_request(
     .to_string()
 }
 
-/// Unhandled promise rejections, captured out of QuickJS itself.
-///
-/// This is the difference between "the page did nothing and said nothing" and
-/// an actual cause. An async chain that rejects with no handler — a failed
-/// dynamic import, a framework bootstrap that throws inside a `then` — is
-/// otherwise completely invisible: no script error, no console output, no
-/// tools, nothing to act on.
-///
-/// rquickjs 0.6 exposes no safe API for this, so it goes through the raw
-/// QuickJS binding. Single-threaded by construction, hence thread-local.
+// Unhandled promise rejections, captured out of QuickJS itself.
+//
+// This is the difference between "the page did nothing and said nothing" and
+// an actual cause. An async chain that rejects with no handler — a failed
+// dynamic import, a framework bootstrap that throws inside a `then` — is
+// otherwise completely invisible: no script error, no console output, no
+// tools, nothing to act on.
+//
+// rquickjs 0.6 exposes no safe API for this, so it goes through the raw
+// QuickJS binding. Single-threaded by construction, hence thread-local.
 thread_local! {
     static REJECTIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -671,6 +678,21 @@ impl Page {
         // A module the page reached for that we never fetched is the single
         // most actionable failure there is, so report it as its own class
         // rather than leaving it buried in a link error.
+        let (lookups, registers) = self.ctx.with(|ctx| {
+            let g = ctx.globals();
+            let l = g
+                .get::<_, Function>("__conduit_lookups")
+                .and_then(|f| f.call::<_, usize>(()))
+                .unwrap_or(0);
+            let r = g
+                .get::<_, Function>("__conduit_register_calls")
+                .and_then(|f| f.call::<_, usize>(()))
+                .unwrap_or(0);
+            (l, r)
+        });
+        self.diagnostics.model_context_lookups = lookups;
+        self.diagnostics.register_calls = registers;
+
         self.diagnostics.unhandled_rejections = REJECTIONS.with(|r| {
             let mut seen: Vec<String> = Vec::new();
             for m in r.borrow().iter() {
@@ -1033,6 +1055,31 @@ mod tests {
             v["error"].as_str().unwrap_or("").contains("blocked"),
             "expected a block, got {out}"
         );
+    }
+
+    #[test]
+    fn registration_activity_is_counted() {
+        // These two counts are what let `probe` say something true instead of
+        // listing every possible reason a page came up empty.
+        let page = load_fixture();
+        assert!(
+            page.diagnostics.model_context_lookups > 0,
+            "the fixture reads document.modelContext"
+        );
+        // Four registerTool calls in the fixture, one of them a debug tool
+        // that is filtered from the listing but still counted here.
+        assert_eq!(page.diagnostics.register_calls, 4);
+    }
+
+    #[test]
+    fn a_page_that_never_looks_is_distinguishable() {
+        let url = url::Url::parse("https://plain.example/").unwrap();
+        let html = "<html><body><script>var x = 1;</script></body></html>";
+        let (scripts, _) = collect_script_refs(html, &url);
+        let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
+        assert_eq!(page.diagnostics.model_context_lookups, 0);
+        assert_eq!(page.diagnostics.register_calls, 0);
+        assert_eq!(page.diagnostics.scripts_failed, 0);
     }
 
     #[test]

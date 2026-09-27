@@ -132,10 +132,37 @@ fn print_report(session: &mcp::Session, target: &str) {
     if tools.is_empty() {
         println!("  No WebMCP tools found.");
         println!();
-        println!("  That usually means one of:");
-        println!("    - the site does not use WebMCP (most sites do not, yet)");
-        println!("    - its tools register only after user interaction");
-        println!("    - a script failed below, and took registration with it");
+        // Say what the evidence supports rather than listing every
+        // possibility. The page either looked for modelContext or it did not,
+        // and it either called registerTool or it did not; those two facts
+        // separate the cases that actually need different responses.
+        if d.register_calls > 0 {
+            println!(
+                "  The page called registerTool {} time(s), and every call was",
+                d.register_calls
+            );
+            println!("  rejected or later unregistered. Check the tool definitions:");
+            println!("  `name` and `description` are required, and `name` is capped");
+            println!("  at 128 characters.");
+        } else if d.model_context_lookups > 0 {
+            println!(
+                "  The page read document.modelContext {} time(s) but never called",
+                d.model_context_lookups
+            );
+            println!("  registerTool. So it IS a WebMCP site — it just did not get as");
+            println!("  far as registering. Usually that means registration sits behind");
+            println!("  something that did not happen here: framework hydration, a");
+            println!("  route transition, or user interaction.");
+        } else if d.scripts_failed > 0 {
+            println!("  The page never looked for document.modelContext, and {} script(s)",
+                d.scripts_failed);
+            println!("  failed below. Registration was most likely lost with them.");
+        } else if d.scripts_total == 0 {
+            println!("  The page has no scripts, and no declarative <form toolname> tools.");
+        } else {
+            println!("  The page ran cleanly and never looked for document.modelContext,");
+            println!("  so it most likely does not use WebMCP. Most sites do not, yet.");
+        }
     } else {
         for t in tools {
             let name = t["name"].as_str().unwrap_or("?");
