@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><title>Module Todo</title></head>
+<body>
+  <div id="root"></div>
+  <script type="module">
+    // Registration deferred through a timer and a microtask, the way a
+    // framework's scheduler would defer it.
+    const items = [];
+    async function boot() {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 50));
+      document.modelContext.registerTool({
+        name: "module-add",
+        description: "Added by a deferred module script",
+        inputSchema: { type: "object", properties: { t: { type: "string" } } },
+        execute: async ({ t }) => { items.push(t); return { count: items.length }; },
+      });
+      const el = document.createElement("div");
+      el.textContent = "booted";
+      document.getElementById("root").appendChild(el);
+    }
+    boot();
+  </script>
+</body></html>

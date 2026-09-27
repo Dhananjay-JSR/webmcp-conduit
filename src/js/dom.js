@@ -535,15 +535,117 @@
   }
   globalThis.document = document;
 
+  // --------------------------------------------------- URL / query strings
+  // QuickJS ships neither, and pages reach for them constantly during setup
+  // (`new URLSearchParams(location.search)` guarding a registration block is
+  // a common pattern in the wild).
+  if (typeof globalThis.URLSearchParams !== "function") {
+    function URLSearchParams(init) {
+      this._p = [];
+      if (typeof init === "string") {
+        var q = init.charAt(0) === "?" ? init.slice(1) : init;
+        if (q) {
+          var parts = q.split("&");
+          for (var i = 0; i < parts.length; i++) {
+            if (!parts[i]) continue;
+            var eq = parts[i].indexOf("=");
+            var k = eq === -1 ? parts[i] : parts[i].slice(0, eq);
+            var v = eq === -1 ? "" : parts[i].slice(eq + 1);
+            this._p.push([dec(k), dec(v)]);
+          }
+        }
+      } else if (init && typeof init === "object") {
+        for (var key in init) this._p.push([key, String(init[key])]);
+      }
+    }
+    function dec(x) {
+      try { return decodeURIComponent(String(x).replace(/\+/g, " ")); }
+      catch (e) { return String(x); }
+    }
+    function enc(x) { return encodeURIComponent(String(x)); }
+
+    URLSearchParams.prototype.get = function (k) {
+      for (var i = 0; i < this._p.length; i++) if (this._p[i][0] === k) return this._p[i][1];
+      return null;
+    };
+    URLSearchParams.prototype.getAll = function (k) {
+      return this._p.filter(function (e) { return e[0] === k; })
+                    .map(function (e) { return e[1]; });
+    };
+    URLSearchParams.prototype.has = function (k) { return this.get(k) !== null; };
+    URLSearchParams.prototype.append = function (k, v) { this._p.push([String(k), String(v)]); };
+    URLSearchParams.prototype.set = function (k, v) {
+      this.delete(k); this._p.push([String(k), String(v)]);
+    };
+    URLSearchParams.prototype.delete = function (k) {
+      this._p = this._p.filter(function (e) { return e[0] !== k; });
+    };
+    URLSearchParams.prototype.forEach = function (fn, self) {
+      for (var i = 0; i < this._p.length; i++) fn.call(self, this._p[i][1], this._p[i][0], this);
+    };
+    URLSearchParams.prototype.keys = function () {
+      return this._p.map(function (e) { return e[0]; });
+    };
+    URLSearchParams.prototype.values = function () {
+      return this._p.map(function (e) { return e[1]; });
+    };
+    URLSearchParams.prototype.entries = function () { return this._p.slice(); };
+    URLSearchParams.prototype.toString = function () {
+      return this._p.map(function (e) { return enc(e[0]) + "=" + enc(e[1]); }).join("&");
+    };
+    globalThis.URLSearchParams = URLSearchParams;
+  }
+
+  if (typeof globalThis.URL !== "function") {
+    var URL_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*:)\/\/([^\/?#:]*)(?::(\d+))?([^?#]*)(\?[^#]*)?(#.*)?$/;
+    function URLShim(input, base) {
+      var href = String(input);
+      if (base && !URL_RE.test(href)) {
+        var b = String(base).replace(/[?#].*$/, "");
+        if (href.charAt(0) === "/") {
+          var m0 = URL_RE.exec(b);
+          href = m0 ? m0[1] + "//" + m0[2] + (m0[3] ? ":" + m0[3] : "") + href : href;
+        } else {
+          href = b.replace(/\/[^\/]*$/, "/") + href;
+        }
+      }
+      var m = URL_RE.exec(href);
+      if (!m) throw new TypeError("Invalid URL: " + input);
+      this.href = href;
+      this.protocol = m[1];
+      this.hostname = m[2];
+      this.port = m[3] || "";
+      this.host = m[2] + (m[3] ? ":" + m[3] : "");
+      this.pathname = m[4] || "/";
+      this.search = m[5] || "";
+      this.hash = m[6] || "";
+      this.origin = m[1] + "//" + this.host;
+      this.searchParams = new globalThis.URLSearchParams(this.search);
+    }
+    URLShim.prototype.toString = function () { return this.href; };
+    globalThis.URL = URLShim;
+  }
+
   var loc = globalThis.__CONDUIT_URL__ || "about:blank";
   var locObj = { href: loc, toString: function () { return loc; } };
+  // These must be populated. Routers read location.pathname and call string
+  // methods on it, so leaving them undefined kills the render with a
+  // TypeError far away from the actual cause.
+  locObj.protocol = ""; locObj.host = ""; locObj.hostname = "";
+  locObj.port = ""; locObj.pathname = "/"; locObj.search = "";
+  locObj.hash = ""; locObj.origin = "null";
   try {
     var u = new URL(loc);
     locObj.protocol = u.protocol; locObj.host = u.host;
     locObj.hostname = u.hostname; locObj.port = u.port;
     locObj.pathname = u.pathname; locObj.search = u.search;
     locObj.hash = u.hash; locObj.origin = u.origin;
-  } catch (_) {}
+  } catch (e) {
+    noteMissing("URL parsing failed for " + loc);
+  }
+  locObj.assign = function () {};
+  locObj.replace = function () {};
+  locObj.reload = function () {};
   globalThis.location = locObj;
   document.location = locObj;
   document.URL = loc;
@@ -650,97 +752,6 @@
     return ran;
   };
 
-  // --------------------------------------------------- URL / query strings
-  // QuickJS ships neither, and pages reach for them constantly during setup
-  // (`new URLSearchParams(location.search)` guarding a registration block is
-  // a common pattern in the wild).
-  if (typeof globalThis.URLSearchParams !== "function") {
-    function URLSearchParams(init) {
-      this._p = [];
-      if (typeof init === "string") {
-        var q = init.charAt(0) === "?" ? init.slice(1) : init;
-        if (q) {
-          var parts = q.split("&");
-          for (var i = 0; i < parts.length; i++) {
-            if (!parts[i]) continue;
-            var eq = parts[i].indexOf("=");
-            var k = eq === -1 ? parts[i] : parts[i].slice(0, eq);
-            var v = eq === -1 ? "" : parts[i].slice(eq + 1);
-            this._p.push([dec(k), dec(v)]);
-          }
-        }
-      } else if (init && typeof init === "object") {
-        for (var key in init) this._p.push([key, String(init[key])]);
-      }
-    }
-    function dec(x) {
-      try { return decodeURIComponent(String(x).replace(/\+/g, " ")); }
-      catch (e) { return String(x); }
-    }
-    function enc(x) { return encodeURIComponent(String(x)); }
-
-    URLSearchParams.prototype.get = function (k) {
-      for (var i = 0; i < this._p.length; i++) if (this._p[i][0] === k) return this._p[i][1];
-      return null;
-    };
-    URLSearchParams.prototype.getAll = function (k) {
-      return this._p.filter(function (e) { return e[0] === k; })
-                    .map(function (e) { return e[1]; });
-    };
-    URLSearchParams.prototype.has = function (k) { return this.get(k) !== null; };
-    URLSearchParams.prototype.append = function (k, v) { this._p.push([String(k), String(v)]); };
-    URLSearchParams.prototype.set = function (k, v) {
-      this.delete(k); this._p.push([String(k), String(v)]);
-    };
-    URLSearchParams.prototype.delete = function (k) {
-      this._p = this._p.filter(function (e) { return e[0] !== k; });
-    };
-    URLSearchParams.prototype.forEach = function (fn, self) {
-      for (var i = 0; i < this._p.length; i++) fn.call(self, this._p[i][1], this._p[i][0], this);
-    };
-    URLSearchParams.prototype.keys = function () {
-      return this._p.map(function (e) { return e[0]; });
-    };
-    URLSearchParams.prototype.values = function () {
-      return this._p.map(function (e) { return e[1]; });
-    };
-    URLSearchParams.prototype.entries = function () { return this._p.slice(); };
-    URLSearchParams.prototype.toString = function () {
-      return this._p.map(function (e) { return enc(e[0]) + "=" + enc(e[1]); }).join("&");
-    };
-    globalThis.URLSearchParams = URLSearchParams;
-  }
-
-  if (typeof globalThis.URL !== "function") {
-    var URL_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*:)\/\/([^\/?#:]*)(?::(\d+))?([^?#]*)(\?[^#]*)?(#.*)?$/;
-    function URLShim(input, base) {
-      var href = String(input);
-      if (base && !URL_RE.test(href)) {
-        var b = String(base).replace(/[?#].*$/, "");
-        if (href.charAt(0) === "/") {
-          var m0 = URL_RE.exec(b);
-          href = m0 ? m0[1] + "//" + m0[2] + (m0[3] ? ":" + m0[3] : "") + href : href;
-        } else {
-          href = b.replace(/\/[^\/]*$/, "/") + href;
-        }
-      }
-      var m = URL_RE.exec(href);
-      if (!m) throw new TypeError("Invalid URL: " + input);
-      this.href = href;
-      this.protocol = m[1];
-      this.hostname = m[2];
-      this.port = m[3] || "";
-      this.host = m[2] + (m[3] ? ":" + m[3] : "");
-      this.pathname = m[4] || "/";
-      this.search = m[5] || "";
-      this.hash = m[6] || "";
-      this.origin = m[1] + "//" + this.host;
-      this.searchParams = new globalThis.URLSearchParams(this.search);
-    }
-    URLShim.prototype.toString = function () { return this.href; };
-    globalThis.URL = URLShim;
-  }
-
   // The window object is an EventTarget. `window` was aliased to globalThis
   // above, but that alias alone leaves `window.addEventListener` undefined,
   // which breaks any page that wires up load or hashchange handlers.
@@ -776,6 +787,12 @@
 
   globalThis.window = globalThis;
   globalThis.self = globalThis;
+  // Routers and framework runtimes reach the window through the document
+  // rather than the global, e.g. `document.defaultView.history`. Without
+  // this they see undefined and the whole render dies on a TypeError.
+  document.defaultView = globalThis;
+  document.activeElement = null;
+  document.cookie = "";
   globalThis.localStorage = (function () {
     var store = Object.create(null);
     return {
@@ -789,13 +806,30 @@
   })();
   globalThis.sessionStorage = globalThis.localStorage;
 
-  if (typeof globalThis.console === "undefined") {
-    globalThis.console = {};
-  }
-  ["log", "info", "warn", "error", "debug"].forEach(function (m) {
-    if (typeof globalThis.console[m] !== "function") {
-      globalThis.console[m] = function () {};
+  // Frameworks report their real problems through console.error, so the
+  // formatting has to survive an Error object. Anything less and the message
+  // that explains the failure is reduced to "[object Object]".
+  function fmtArg(v) {
+    if (typeof v === "string") return v;
+    if (v instanceof Error || (v && typeof v.message === "string" && v.stack)) {
+      return (v.name || "Error") + ": " + v.message +
+             (v.stack ? "\n  " + String(v.stack).split("\n")[0].trim() : "");
     }
+    try {
+      var j = JSON.stringify(v);
+      if (j !== undefined) return j;
+    } catch (_) {}
+    try { return String(v); } catch (_) { return "[unprintable]"; }
+  }
+
+  globalThis.console = {};
+  ["log", "info", "warn", "error", "debug", "trace"].forEach(function (m) {
+    globalThis.console[m] = function () {
+      if (typeof globalThis.__conduit_log !== "function") return;
+      var parts = [];
+      for (var i = 0; i < arguments.length; i++) parts.push(fmtArg(arguments[i]));
+      globalThis.__conduit_log(m.toUpperCase() + " " + parts.join(" "));
+    };
   });
 
   // Observers a page may construct during registration. Inert, but present,

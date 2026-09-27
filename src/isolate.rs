@@ -249,29 +249,20 @@ impl Page {
             globals.set("__CONDUIT_URL__", url.as_str())?;
 
             // A console that actually reaches the operator's stderr, rather
-            // than a black hole — page logs are useful when diagnosing a miss.
+            // than a black hole — page logs are the fastest way to find out
+            // why a framework gave up.
             //
-            // It must accept *any* arguments. A binding typed to `String`
-            // makes `console.error(someObject)` throw a conversion error into
-            // the page, which is how instrumentation ends up breaking the very
+            // Rust takes only a finished string. Formatting lives in JS,
+            // which can tell an Error from a plain object; from here every
+            // non-string argument looks alike. It must also accept *any*
+            // argument type: a binding typed to `String` makes
+            // `console.error(someObject)` throw a conversion error into the
+            // page, which is how instrumentation ends up breaking the very
             // render it was meant to observe.
-            let log = Function::new(ctx.clone(), |args: Rest<JsValue<'_>>| {
-                let line = args
-                    .iter()
-                    .map(|v| match v.type_of() {
-                        Type::String => v.as_string().and_then(|s| s.to_string().ok()),
-                        _ => None,
-                    }
-                    .unwrap_or_else(|| format!("{:?}", v.type_of())))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+            let log = Function::new(ctx.clone(), |line: String| {
                 tracing::debug!(target: "page", "{line}");
             })?;
-            let console = rquickjs::Object::new(ctx.clone())?;
-            for m in ["log", "info", "warn", "error", "debug"] {
-                console.set(m, log.clone())?;
-            }
-            globals.set("console", console)?;
+            globals.set("__conduit_log", log)?;
 
             ctx.eval::<(), _>(DOM_JS).map_err(|e| anyhow!("dom.js: {e}"))?;
             ctx.eval::<(), _>(SHIM_JS).map_err(|e| anyhow!("shim.js: {e}"))?;
@@ -539,12 +530,73 @@ mod tests {
     use super::*;
 
     const TODO: &str = include_str!("../fixtures/todo.html");
+    const MODULE_TODO: &str = include_str!("../fixtures/module-todo.html");
 
     fn load_fixture() -> Page {
         let url = url::Url::parse("https://todo.example/app").unwrap();
         let (scripts, external) = collect_script_refs(TODO, &url);
         assert!(external.is_empty(), "fixture should have no external scripts");
         Page::load(TODO, &url, scripts, HashMap::new()).expect("page should load")
+    }
+
+    fn load_module_fixture() -> Page {
+        let url = url::Url::parse("https://todo.example/app").unwrap();
+        let (scripts, external) = collect_script_refs(MODULE_TODO, &url);
+        assert!(external.is_empty());
+        assert!(scripts.iter().any(|s| s.is_module), "fixture must use a module");
+        Page::load(MODULE_TODO, &url, scripts, HashMap::new()).expect("page should load")
+    }
+
+    #[test]
+    fn runs_module_scripts_and_awaits_deferred_registration() {
+        // `import ... from` is a syntax error in classic-script mode, and a
+        // module that defers past a microtask and a timer only registers if
+        // microtasks and timers are drained together.
+        let page = load_module_fixture();
+        assert!(
+            page.diagnostics.script_errors.is_empty(),
+            "unexpected errors: {:?}",
+            page.diagnostics.script_errors
+        );
+        let tools = page.harvest().unwrap();
+        assert_eq!(tools.len(), 1, "got {:?}", tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(tools[0].name, "module-add");
+    }
+
+    #[test]
+    fn module_side_effects_reach_the_dom() {
+        let page = load_module_fixture();
+        let text = page.eval_debug("document.getElementById('root').textContent").unwrap();
+        assert_eq!(text, "booted");
+    }
+
+    #[test]
+    fn location_is_fully_populated() {
+        // A router reads location.pathname and calls string methods on it.
+        // Leaving these undefined kills a render with a TypeError raised far
+        // from the actual cause.
+        let page = load_fixture();
+        for prop in ["pathname", "origin", "protocol", "host", "search", "hash"] {
+            let v = page
+                .eval_debug(&format!("typeof location.{prop}"))
+                .unwrap();
+            assert_eq!(v, "string", "location.{prop} should be a string, got {v}");
+        }
+    }
+
+    #[test]
+    fn document_exposes_its_window() {
+        // Framework runtimes reach the window through the document, e.g.
+        // `document.defaultView.history`.
+        let page = load_fixture();
+        assert_eq!(
+            page.eval_debug("document.defaultView === globalThis").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            page.eval_debug("typeof document.defaultView.history.pushState").unwrap(),
+            "function"
+        );
     }
 
     #[test]

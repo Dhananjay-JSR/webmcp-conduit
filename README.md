@@ -100,8 +100,7 @@ issue with the output.
 Early. The engine works end to end — page scripts execute, tools register,
 `tools/call` mutates real page state that persists across calls. What's missing:
 
-- **Framework commit phases.** React renders without error but does not commit,
-  so tools registered inside `useEffect` never run. Vanilla-JS pages work well.
+- **Angular and other framework runtimes** are untested; React works.
 - **`fetch` inside tools.** Tools that call their own backend during `execute`
   will not settle.
 - **Authenticated sessions.** No cookie jar yet, so logged-in sites see you
@@ -110,18 +109,7 @@ Early. The engine works end to end — page scripts execute, tools register,
 ## Scope
 
 `conduit` targets the **W3C WebMCP specification** — `document.modelContext`,
-as implemented in Chrome and ChatGPT — and nothing else.
-
-The pre-standard [jasonjmcghee/WebMCP](https://github.com/jasonjmcghee/WebMCP)
-widget (`new WebMCP()` with positional `registerTool(name, desc, schema, fn)`,
-plus a localhost WebSocket bridge) is **explicitly out of scope**. Its own
-README now points to the W3C spec. Supporting a second, incompatible shape
-would double the surface area of the engine to chase an API that is being
-retired. Sites built on it — `webmcp.dev` among them — will probe empty, by
-design rather than by omission.
-
-Also worth saying plainly: very few sites ship WebMCP today. This is
-infrastructure for a standard that is still arriving.
+as implemented in Chrome and ChatGPT.
 
 ## Respecting opt-out
 
