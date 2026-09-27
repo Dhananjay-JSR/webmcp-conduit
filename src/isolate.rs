@@ -17,7 +17,11 @@
 
 use crate::tool::{Annotations, WebTool};
 use anyhow::{anyhow, Context as _, Result};
-use rquickjs::loader::{BuiltinLoader, Resolver};
+use rquickjs::loader::{BuiltinLoader, Loader, Resolver};
+use rquickjs::module::Declared;
+use rquickjs::Module as JsModule;
+use std::cell::RefCell;
+use std::rc::Rc;
 use rquickjs::{Context, Ctx, Function, Module, Runtime};
 use std::collections::HashMap;
 use scraper::{Html, Selector};
@@ -46,12 +50,17 @@ pub struct Diagnostics {
     pub script_errors: Vec<String>,
     pub scripts_total: usize,
     pub scripts_failed: usize,
+    /// Modules the page tried to import that were not in the prefetched graph.
+    pub unresolved_modules: Vec<String>,
 }
 
 pub struct Page {
     ctx: Context,
     _rt: Runtime,
     pub diagnostics: Diagnostics,
+    /// Specifiers the page asked to import that were not in the prefetched
+    /// graph. Populated by RecordingLoader as the page runs.
+    module_misses: Rc<RefCell<Vec<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +146,30 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
     }
 
     (scripts, external)
+}
+
+/// A loader that remembers what it was asked for and could not provide.
+///
+/// Without this, a module that was never prefetched fails somewhere deep in a
+/// promise chain and disappears — the page reports no error and no tools, and
+/// there is nothing to act on. A miss recorded here names the exact specifier
+/// that was missing, which is the difference between "it did not work" and a
+/// one-line fix.
+struct RecordingLoader {
+    inner: BuiltinLoader,
+    misses: Rc<RefCell<Vec<String>>>,
+}
+
+impl Loader for RecordingLoader {
+    fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<JsModule<'js, Declared>> {
+        match self.inner.load(ctx, name) {
+            Ok(m) => Ok(m),
+            Err(e) => {
+                self.misses.borrow_mut().push(name.to_string());
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Modules the document declares via `<link rel="modulepreload">`.
@@ -239,7 +272,11 @@ impl Page {
         for (name, source) in &modules {
             loader.add_module(name.clone(), source.clone());
         }
-        rt.set_loader(UrlResolver { page: url.to_string() }, loader);
+        let misses: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        rt.set_loader(
+            UrlResolver { page: url.to_string() },
+            RecordingLoader { inner: loader, misses: Rc::clone(&misses) },
+        );
 
         let ctx = Context::full(&rt).context("creating QuickJS context")?;
         let _origin = url.origin().ascii_serialization();
@@ -291,6 +328,7 @@ impl Page {
             ctx,
             _rt: rt,
             diagnostics,
+            module_misses: misses,
         };
 
         // Browsers run classic scripts as they are parsed and defer modules
@@ -434,6 +472,21 @@ impl Page {
         });
         self.diagnostics.missing_apis = missing;
         self.diagnostics.script_errors.extend(errors);
+
+        // A module the page reached for that we never fetched is the single
+        // most actionable failure there is, so report it as its own class
+        // rather than leaving it buried in a link error.
+        let misses = self.module_misses.borrow();
+        if !misses.is_empty() {
+            let mut unique: Vec<&String> = Vec::new();
+            for m in misses.iter() {
+                if !unique.contains(&m) {
+                    unique.push(m);
+                }
+            }
+            self.diagnostics.unresolved_modules =
+                unique.into_iter().cloned().collect();
+        }
     }
 
     /// Evaluate an arbitrary expression for diagnostics. The result is
@@ -664,6 +717,27 @@ mod tests {
         let items = parsed["items"].as_array().unwrap();
         assert_eq!(items.len(), 2, "got {items:?}");
         assert_eq!(items[1], json!("walk the dog"));
+    }
+
+    #[test]
+    fn unresolved_modules_are_reported_by_name() {
+        // A module the page imports but that was never prefetched used to
+        // fail somewhere in a promise chain and vanish, leaving no error and
+        // no tools. The specifier itself is the actionable part.
+        let url = url::Url::parse("https://app.example/index.html").unwrap();
+        let html = r#"<html><body><script type="module">
+            import "./never-fetched.js";
+        </script></body></html>"#;
+        let (scripts, _) = collect_script_refs(html, &url);
+        let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
+        assert!(
+            page.diagnostics
+                .unresolved_modules
+                .iter()
+                .any(|m| m.contains("never-fetched.js")),
+            "got {:?}",
+            page.diagnostics.unresolved_modules
+        );
     }
 
     #[test]

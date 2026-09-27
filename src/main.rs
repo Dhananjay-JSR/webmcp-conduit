@@ -168,6 +168,21 @@ fn print_report(session: &mcp::Session, target: &str) {
         }
     }
 
+    if !d.unresolved_modules.is_empty() {
+        println!();
+        println!("  Modules the page imported that were not prefetched:");
+        for m in d.unresolved_modules.iter().take(10) {
+            println!("    - {m}");
+        }
+        if d.unresolved_modules.len() > 10 {
+            println!("    ... and {} more", d.unresolved_modules.len() - 10);
+        }
+        println!();
+        println!("  These are resolved at runtime, so static scanning cannot see");
+        println!("  them. That is usually why a page loads without error but");
+        println!("  registers nothing.");
+    }
+
     if !d.missing_apis.is_empty() {
         println!();
         println!("  Platform APIs this page wanted that conduit does not implement:");

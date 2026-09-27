@@ -85,6 +85,9 @@ const SCRIPT_CDNS: &[&str] = &[
 ];
 
 pub fn origin_allowed(url: &Url, page_origin: &str) -> bool {
+    if url.scheme() == "file" {
+        return true;
+    }
     if url.origin().ascii_serialization() == page_origin {
         return true;
     }
@@ -97,6 +100,17 @@ pub fn origin_allowed(url: &Url, page_origin: &str) -> bool {
 /// well-known script CDNs are, so a page cannot pull executable code from an
 /// arbitrary third party we were never asked to trust.
 pub async fn script(client: &reqwest::Client, url: &Url, page_origin: &str) -> Result<String> {
+    // A local file target is the documented way to debug a page, and its
+    // scripts and modules are siblings on disk. Without this, `probe
+    // ./page.html` silently loses every relative import.
+    if url.scheme() == "file" {
+        let path = url
+            .to_file_path()
+            .map_err(|_| anyhow!("not a readable file path: {url}"))?;
+        return std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()));
+    }
+
     if !origin_allowed(url, page_origin) {
         return Err(anyhow!(
             "cross-origin script blocked: {url} (page origin {page_origin})"

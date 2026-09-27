@@ -30,7 +30,16 @@ pub fn import_specifiers(source: &str) -> Vec<String> {
             // The whitespace before `from` is optional on purpose: minified
             // bundles emit `import{X as y}from"z"`, and requiring a space
             // there makes every such import invisible to the graph walk.
-            Regex::new(r#"\bimport\b\s*(?:[\w${},*\s]+?\s*from\s*)?["']([^"']+)["']"#).unwrap(),
+            //
+            // A static import only appears at statement position, so require
+            // a plausible token before it. Without that, the word `import`
+            // inside a string literal — a tool named "from-dynamic-import",
+            // say — matches, and the scanner tries to fetch the rest of the
+            // line as a module.
+            Regex::new(
+                r#"(?m)(?:^|[;{}()\[\]=>,]|\bexport\b)\s*import\b\s*(?:[\w${},*\s]+?\s*from\s*)?["']([^"']+)["']"#,
+            )
+            .unwrap(),
             // `export { x } from "y"` — only the re-export form has a specifier.
             Regex::new(r#"\bexport\b[^;]*?\bfrom\b\s*["']([^"']+)["']"#).unwrap(),
             // `export * from "y"`
@@ -160,6 +169,21 @@ export{a as b}from"/node/util.mjs""#;
         assert!(specs.contains(&"/node/tty.mjs".to_string()), "got {specs:?}");
         assert!(specs.contains(&"/node/buffer.mjs".to_string()), "got {specs:?}");
         assert!(specs.contains(&"/node/util.mjs".to_string()), "got {specs:?}");
+    }
+
+    #[test]
+    fn ignores_the_word_import_inside_strings() {
+        // A tool named "from-dynamic-import" used to make the scanner capture
+        // the remainder of the line as a specifier and fetch it.
+        let src = r#"
+            document.modelContext.registerTool({
+              name: "from-dynamic-import",
+              description: "Registered by a dynamically imported module",
+              execute: function(){ return { ok: true }; }
+            });
+        "#;
+        let specs = import_specifiers(src);
+        assert!(specs.is_empty(), "false positives: {specs:?}");
     }
 
     #[test]

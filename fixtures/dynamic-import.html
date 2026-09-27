@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><title>Dynamic import</title></head>
+<body>
+  <div id="root"></div>
+  <!-- A classic script that bootstraps the app through a dynamic import.
+       This is how modern bundlers start: the entry module is named only
+       inside import(), never in a <script type="module"> tag. -->
+  <script>
+    globalThis.__marker = "classic-ran";
+    import("./dynamic-module.js")
+      .then(function () { globalThis.__marker = "import-resolved"; })
+      .catch(function (e) {
+        globalThis.__marker = "import-failed: " + String((e && e.message) || e);
+      });
+  </script>
+</body></html>
