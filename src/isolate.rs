@@ -74,6 +74,9 @@ pub struct Diagnostics {
     /// How many times `registerTool` was called, including calls that were
     /// then rejected.
     pub register_calls: usize,
+    /// How many times the page called `getTools` or `executeTool` — that is,
+    /// used WebMCP as a client rather than providing tools of its own.
+    pub consume_calls: usize,
 }
 
 pub struct Page {
@@ -678,7 +681,7 @@ impl Page {
         // A module the page reached for that we never fetched is the single
         // most actionable failure there is, so report it as its own class
         // rather than leaving it buried in a link error.
-        let (lookups, registers) = self.ctx.with(|ctx| {
+        let (lookups, registers, consumes) = self.ctx.with(|ctx| {
             let g = ctx.globals();
             let l = g
                 .get::<_, Function>("__conduit_lookups")
@@ -688,10 +691,15 @@ impl Page {
                 .get::<_, Function>("__conduit_register_calls")
                 .and_then(|f| f.call::<_, usize>(()))
                 .unwrap_or(0);
-            (l, r)
+            let c = g
+                .get::<_, Function>("__conduit_consume_calls")
+                .and_then(|f| f.call::<_, usize>(()))
+                .unwrap_or(0);
+            (l, r, c)
         });
         self.diagnostics.model_context_lookups = lookups;
         self.diagnostics.register_calls = registers;
+        self.diagnostics.consume_calls = consumes;
 
         self.diagnostics.unhandled_rejections = REJECTIONS.with(|r| {
             let mut seen: Vec<String> = Vec::new();
@@ -1080,6 +1088,22 @@ mod tests {
         assert_eq!(page.diagnostics.model_context_lookups, 0);
         assert_eq!(page.diagnostics.register_calls, 0);
         assert_eq!(page.diagnostics.scripts_failed, 0);
+    }
+
+    #[test]
+    fn a_client_page_is_not_a_failed_provider() {
+        // Some WebMCP pages are agents: they read another page's tools and
+        // invoke them, and never register any of their own. An empty tool
+        // list is the correct answer for those, not a failure, so the two
+        // cases have to be distinguishable.
+        let url = url::Url::parse("https://agent.example/").unwrap();
+        let html = r#"<html><body><script>
+            document.modelContext.getTools().then(function(){});
+        </script></body></html>"#;
+        let (scripts, _) = collect_script_refs(html, &url);
+        let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
+        assert_eq!(page.diagnostics.register_calls, 0);
+        assert!(page.diagnostics.consume_calls > 0, "getTools should count as consumption");
     }
 
     #[test]

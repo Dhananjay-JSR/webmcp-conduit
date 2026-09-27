@@ -144,6 +144,14 @@ fn print_report(session: &mcp::Session, target: &str) {
             println!("  rejected or later unregistered. Check the tool definitions:");
             println!("  `name` and `description` are required, and `name` is capped");
             println!("  at 128 characters.");
+        } else if d.consume_calls > 0 {
+            println!("  This page uses WebMCP as a client, not a provider: it called");
+            println!(
+                "  getTools/executeTool {} time(s) and registerTool none.",
+                d.consume_calls
+            );
+            println!("  It drives other sites' tools rather than exposing its own, so");
+            println!("  an empty list is the correct result here, not a failure.");
         } else if d.model_context_lookups > 0 {
             println!(
                 "  The page read document.modelContext {} time(s) but never called",

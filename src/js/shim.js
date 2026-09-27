@@ -124,6 +124,7 @@
 
     getTools(options) {
       var self = this;
+      consumeCalls++;
       return new Promise(function (resolve) {
         var from = options && Array.isArray(options.fromOrigins)
           ? options.fromOrigins : null;
@@ -147,6 +148,7 @@
 
     executeTool(tool, inputObject, options) {
       var self = this;
+      consumeCalls++;
       var name = tool && tool.name;
       var rec = name ? self._tools.get(name) : null;
 
@@ -196,8 +198,13 @@
   // from calling it and having it rejected.
   var lookups = 0;
   var registerCalls = 0;
+  var consumeCalls = 0;
   globalThis.__conduit_lookups = function () { return lookups; };
   globalThis.__conduit_register_calls = function () { return registerCalls; };
+  // Not every WebMCP page is a provider. Some are agents that read another
+  // page's tools and invoke them, and for those an empty tool list is the
+  // correct answer rather than a failure.
+  globalThis.__conduit_consume_calls = function () { return consumeCalls; };
 
   Object.defineProperty(globalThis.document, "modelContext", {
     get: function () { lookups++; return modelContext; },
