@@ -30,8 +30,16 @@ use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
-/// Web globals QuickJS lacks that happy-dom needs at load time.
+/// Host-owned decisions: virtual-clock timers, console bridging, diagnostics.
 const HOST_PRE_JS: &str = include_str!("js/host-pre.js");
+/// Encoding, as its own bundle because it has to be first: bundlers run every
+/// module initializer before the entry body, and whatwg-url constructs a
+/// TextEncoder at module scope.
+const ENCODING_JS: &str = include_str!("js/vendor/encoding.js");
+/// The rest of the web platform QuickJS lacks — streams, URL, structuredClone
+/// — from vendored spec-tracking implementations rather than anything written
+/// here. Must precede happy-dom, which subclasses URL at load time.
+const PLATFORM_JS: &str = include_str!("js/vendor/platform.js");
 /// happy-dom, bundled. Vendored rather than built from npm so `cargo install`
 /// needs no Node toolchain. See vendor-build/ for how it is produced.
 const HAPPY_DOM_JS: &str = include_str!("js/vendor/happy-dom.js");
@@ -300,12 +308,33 @@ impl Page {
             })?;
             globals.set("__conduit_log", log)?;
 
-            // Order matters: happy-dom subclasses URL and reads timers at load
-            // time, so the prelude has to be in place before it evaluates.
+            // Order matters. happy-dom subclasses URL and reads timers at load
+            // time, so both the host prelude and the platform layer have to be
+            // in place before it evaluates.
             ctx.eval::<(), _>(HOST_PRE_JS)
                 .map_err(|e| anyhow!("host-pre.js: {}", describe_exception(&ctx, &e.to_string())))?;
+            ctx.eval::<(), _>(ENCODING_JS)
+                .map_err(|e| anyhow!("encoding.js: {}", describe_exception(&ctx, &e.to_string())))?;
+            ctx.eval::<(), _>(PLATFORM_JS)
+                .map_err(|e| anyhow!("platform.js: {}", describe_exception(&ctx, &e.to_string())))?;
             ctx.eval::<(), _>(HAPPY_DOM_JS)
                 .map_err(|e| anyhow!("happy-dom: {}", describe_exception(&ctx, &e.to_string())))?;
+            // happy-dom's bundle can evaluate without throwing and still fail
+            // to export a Window, which shows up much later as an unhelpful
+            // "not a constructor" from host-post.js.
+            let kind: String = ctx
+                .eval::<String, _>("typeof globalThis.__HappyWindow")
+                .unwrap_or_else(|_| "unknown".into());
+            if kind != "function" {
+                let detail: String = ctx
+                    .eval::<String, _>(
+                        "JSON.stringify(globalThis.__conduit_errors.slice(0,3))",
+                    )
+                    .unwrap_or_else(|_| "[]".into());
+                return Err(anyhow!(
+                    "happy-dom loaded but exported no Window (typeof __HappyWindow = {kind}); page errors: {detail}"
+                ));
+            }
             ctx.eval::<(), _>(HOST_POST_JS)
                 .map_err(|e| anyhow!("host-post.js: {}", describe_exception(&ctx, &e.to_string())))?;
 

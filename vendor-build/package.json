@@ -3,9 +3,16 @@
   "private": true,
   "type": "module",
   "description": "Regenerates src/js/vendor/happy-dom.js. Not part of the Rust build.",
-  "scripts": { "build": "node build.mjs" },
+  "scripts": {
+    "build": "node build.mjs"
+  },
   "dependencies": {
+    "@ungap/structured-clone": "^1.4.0",
+    "core-js": "^3.50.0",
+    "esbuild": "^0.25.0",
+    "fastestsmallesttextencoderdecoder": "^1.0.22",
     "happy-dom-without-node": "14.12.3",
-    "esbuild": "^0.25.0"
+    "web-streams-polyfill": "^4.3.0",
+    "whatwg-url": "^17.1.2"
   }
 }

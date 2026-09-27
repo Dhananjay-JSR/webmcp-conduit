@@ -12,11 +12,21 @@
     throw new Error("happy-dom did not load: __HappyWindow is not a constructor");
   }
 
-  var win = new Window({
-    url: globalThis.__CONDUIT_URL__ || "about:blank",
-    width: 1280,
-    height: 800,
-  });
+  var win;
+  try {
+    win = new Window({
+      url: globalThis.__CONDUIT_URL__ || "about:blank",
+      width: 1280,
+      height: 800,
+    });
+  } catch (e) {
+    throw new Error(
+      "constructing happy-dom Window failed: " + String((e && e.message) || e) +
+      " [Window is " + typeof Window +
+      ", URL is " + typeof globalThis.URL +
+      ", url=" + String(globalThis.__CONDUIT_URL__) + "]"
+    );
+  }
   globalThis.__conduit_window = win;
 
   // Methods that genuinely need `this` to be the window. Copying these across

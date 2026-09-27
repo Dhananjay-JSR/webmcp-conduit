@@ -1,9 +1,16 @@
-// conduit host prelude — runs before happy-dom.
+// conduit host prelude — runs before the vendored platform layer.
 //
-// QuickJS is a bare ES engine: no timers, no URL, no TextEncoder. happy-dom
-// expects those to exist (it even subclasses URL), so they have to be in place
-// first. It also expects a few Node globals, which are stubbed rather than
-// implemented — a WebMCP harvest never needs a filesystem or a subprocess.
+// Only the things that are genuinely *host* decisions live here. The web
+// platform proper (streams, URL, encoding) comes from vendored, spec-tracking
+// implementations in vendor/platform.js; writing those by hand is the same
+// mistake as writing a DOM by hand, one layer down.
+//
+// What stays:
+//   * timers, because they run on a virtual clock rather than real time
+//   * console, because it bridges to the host's tracing
+//   * diagnostics, which are ours
+//   * a few Node globals happy-dom reaches for, stubbed because a WebMCP
+//     harvest never needs a filesystem or a subprocess
 (function (globalThis) {
   "use strict";
 
@@ -102,113 +109,36 @@
     };
   }
 
-  // ------------------------------------------------------ text encode/decode
-  if (typeof globalThis.TextEncoder === "undefined") {
-    globalThis.TextEncoder = function TextEncoder() {};
-    globalThis.TextEncoder.prototype.encode = function (s) {
-      s = String(s == null ? "" : s);
-      var a = new Uint8Array(s.length);
-      for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 255;
-      return a;
-    };
-    globalThis.TextDecoder = function TextDecoder() {};
-    globalThis.TextDecoder.prototype.decode = function (b) {
-      if (!b) return "";
-      var o = "";
-      for (var i = 0; i < b.length; i++) o += String.fromCharCode(b[i]);
-      return o;
-    };
+  // ------------------------------------------------- engine capability gaps
+  // Not web APIs — these are places where QuickJS predates the JS spec the
+  // vendored platform layer was written against. webidl-conversions reads
+  // these property descriptors at load time and dies on a missing one, so
+  // they have to exist before platform.js evaluates.
+  //
+  // Each descriptor is checked on its own. QuickJS *does* have
+  // SharedArrayBuffer, just not the resizable-buffer additions to it, so
+  // gating on whether the constructor exists skips the very properties that
+  // are missing.
+  function ensureGetter(obj, name, get) {
+    if (!obj) return;
+    try {
+      if (!Object.getOwnPropertyDescriptor(obj, name)) {
+        Object.defineProperty(obj, name, { get: get, configurable: true });
+      }
+    } catch (e) { /* frozen prototype; nothing to do */ }
   }
 
-  // --------------------------------------------------------- URL primitives
-  // happy-dom subclasses URL, so a missing global here is not a soft failure —
-  // it is "parent class must be constructor" at load time.
-  if (typeof globalThis.URLSearchParams === "undefined") {
-    function dec(x) {
-      try { return decodeURIComponent(String(x).replace(/\+/g, " ")); }
-      catch (e) { return String(x); }
-    }
-    function USP(init) {
-      this._p = [];
-      if (typeof init === "string") {
-        var q = init.charAt(0) === "?" ? init.slice(1) : init;
-        if (q) {
-          q.split("&").forEach(function (kv) {
-            if (!kv) return;
-            var i = kv.indexOf("=");
-            this._p.push([dec(i < 0 ? kv : kv.slice(0, i)), dec(i < 0 ? "" : kv.slice(i + 1))]);
-          }, this);
-        }
-      } else if (init && typeof init === "object") {
-        if (typeof init.forEach === "function" && init._p) {
-          init._p.forEach(function (e) { this._p.push([e[0], e[1]]); }, this);
-        } else {
-          for (var k in init) this._p.push([k, String(init[k])]);
-        }
-      }
-    }
-    USP.prototype.get = function (k) {
-      for (var i = 0; i < this._p.length; i++) if (this._p[i][0] === k) return this._p[i][1];
-      return null;
+  if (typeof globalThis.SharedArrayBuffer === "undefined") {
+    globalThis.SharedArrayBuffer = function SharedArrayBuffer() {
+      throw new Error("SharedArrayBuffer is not available in conduit");
     };
-    USP.prototype.getAll = function (k) {
-      return this._p.filter(function (e) { return e[0] === k; }).map(function (e) { return e[1]; });
-    };
-    USP.prototype.has = function (k) { return this.get(k) !== null; };
-    USP.prototype.append = function (k, v) { this._p.push([String(k), String(v)]); };
-    USP.prototype.set = function (k, v) { this.delete(k); this._p.push([String(k), String(v)]); };
-    USP.prototype.delete = function (k) {
-      this._p = this._p.filter(function (e) { return e[0] !== k; });
-    };
-    USP.prototype.forEach = function (f, t) {
-      this._p.forEach(function (e) { f.call(t, e[1], e[0], this); }, this);
-    };
-    USP.prototype.keys = function () { return this._p.map(function (e) { return e[0]; }); };
-    USP.prototype.values = function () { return this._p.map(function (e) { return e[1]; }); };
-    USP.prototype.entries = function () { return this._p.map(function (e) { return [e[0], e[1]]; }); };
-    USP.prototype.toString = function () {
-      return this._p.map(function (e) {
-        return encodeURIComponent(e[0]) + "=" + encodeURIComponent(e[1]);
-      }).join("&");
-    };
-    globalThis.URLSearchParams = USP;
   }
-
-  if (typeof globalThis.URL === "undefined") {
-    var HIER = /^([a-zA-Z][a-zA-Z0-9+.-]*:)\/\/([^\/?#:]*)(?::(\d+))?([^?#]*)(\?[^#]*)?(#.*)?$/;
-    var OPAQUE = /^([a-zA-Z][a-zA-Z0-9+.-]*:)([^#]*)(#.*)?$/;
-    function U(input, base) {
-      var href = String(input);
-      if (base && !HIER.test(href) && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) {
-        var b = String(base).replace(/[?#].*$/, "");
-        if (href.charAt(0) === "/") {
-          var m0 = HIER.exec(b);
-          href = m0 ? m0[1] + "//" + m0[2] + (m0[3] ? ":" + m0[3] : "") + href : href;
-        } else {
-          href = b.replace(/\/[^\/]*$/, "/") + href;
-        }
-      }
-      var m = HIER.exec(href);
-      if (m) {
-        this.href = href; this.protocol = m[1]; this.hostname = m[2];
-        this.port = m[3] || ""; this.host = m[2] + (m[3] ? ":" + m[3] : "");
-        this.pathname = m[4] || "/"; this.search = m[5] || ""; this.hash = m[6] || "";
-        this.origin = m[1] + "//" + this.host;
-      } else {
-        // Opaque schemes: about:blank, data:, blob:, javascript:
-        var op = OPAQUE.exec(href);
-        if (!op) throw new TypeError("Invalid URL: " + input);
-        this.href = href; this.protocol = op[1]; this.hostname = "";
-        this.port = ""; this.host = ""; this.pathname = op[2] || "";
-        this.search = ""; this.hash = op[3] || ""; this.origin = "null";
-      }
-      this.username = ""; this.password = "";
-      this.searchParams = new globalThis.URLSearchParams(this.search);
-    }
-    U.prototype.toString = function () { return this.href; };
-    U.prototype.toJSON = function () { return this.href; };
-    globalThis.URL = U;
-  }
+  ensureGetter(globalThis.SharedArrayBuffer.prototype, "byteLength", function () { return 0; });
+  ensureGetter(globalThis.SharedArrayBuffer.prototype, "growable", function () { return false; });
+  ensureGetter(globalThis.SharedArrayBuffer.prototype, "maxByteLength", function () { return 0; });
+  ensureGetter(ArrayBuffer.prototype, "resizable", function () { return false; });
+  ensureGetter(ArrayBuffer.prototype, "maxByteLength", function () { return this.byteLength; });
+  ensureGetter(ArrayBuffer.prototype, "detached", function () { return false; });
 
   // -------------------------------------------------------- Node-ish stubs
   // Referenced by happy-dom but never reached on a harvest path.
@@ -221,6 +151,27 @@
       byteLength: function () { return 0; },
     };
   }
+  // happy-dom is bundled for the Node platform, so esbuild leaves `require`
+  // calls in place for the builtins it touches. None of them are reached on a
+  // harvest path, but the symbol has to exist for the bundle to load.
+  if (typeof globalThis.require === "undefined") {
+    globalThis.require = function (name) {
+      switch (name) {
+        case "buffer":
+          return { Buffer: globalThis.Buffer };
+        case "url":
+          return { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams };
+        case "util":
+          return { TextEncoder: globalThis.TextEncoder, TextDecoder: globalThis.TextDecoder };
+        case "path":
+          return { join: function () { return ""; }, resolve: function () { return ""; } };
+        default:
+          globalThis.__conduit_note_missing("require('" + name + "')");
+          return {};
+      }
+    };
+  }
+
   if (typeof globalThis.process === "undefined") {
     globalThis.process = {
       env: {}, argv: [], platform: "linux", version: "v20.0.0",

@@ -1,11 +1,32 @@
-# Vendored happy-dom
+# Vendored JavaScript
 
-`src/js/vendor/happy-dom.js` is a bundled build of
-[happy-dom](https://github.com/capricorn86/happy-dom) (MIT), embedded into the
-binary with `include_str!`.
+Three bundles are embedded into the binary with `include_str!`:
 
-It is vendored rather than built from npm at compile time so that
+| File | Contents | Why |
+|---|---|---|
+| `vendor/encoding.js` | TextEncoder / TextDecoder | Must load first — other packages construct one at module scope |
+| `vendor/platform.js` | Streams, URL, structuredClone | The web platform QuickJS lacks |
+| `vendor/happy-dom.js` | The DOM | |
+
+They are vendored rather than built from npm at compile time so that
 `cargo install webmcp-conduit` needs no Node toolchain.
+
+Nothing here is hand-written. Writing a DOM by hand is a treadmill where every
+new site finds a new gap; writing the platform layer by hand is the same
+mistake one layer down. What `host-pre.js` still owns is only what no library
+can provide, because it is a host decision: timers on a virtual clock, the
+console bridge to Rust tracing, and egress policy.
+
+## Two choices that are not obvious
+
+**core-js for URL, not whatwg-url.** whatwg-url is the spec-correct choice and
+does not work here: it builds its interface objects through webidl2js, and the
+result is not constructible under QuickJS — `new URL(...)` throws "not a
+constructor". core-js targets old engines and works.
+
+**The browser build of the text encoder, not the Node build.** The Node build
+encodes through `Buffer`, which does not meaningfully exist here, and fails at
+`encode()` rather than at load — so it looks fine until something uses it.
 
 ## Regenerating
 
