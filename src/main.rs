@@ -168,6 +168,20 @@ fn print_report(session: &mcp::Session, target: &str) {
         }
     }
 
+    if !d.unhandled_rejections.is_empty() {
+        println!();
+        println!("  Unhandled promise rejections ({}):", d.unhandled_rejections.len());
+        for r in d.unhandled_rejections.iter().take(8) {
+            println!("    - {}", r.lines().next().unwrap_or("").trim());
+        }
+        if d.unhandled_rejections.len() > 8 {
+            println!("    ... and {} more", d.unhandled_rejections.len() - 8);
+        }
+        println!();
+        println!("  An async chain gave up here. This is often the only trace of");
+        println!("  a bootstrap that failed without throwing anywhere visible.");
+    }
+
     if !d.unresolved_modules.is_empty() {
         println!();
         println!("  Modules the page imported that were not prefetched:");

@@ -56,6 +56,9 @@ pub struct Diagnostics {
     pub missing_apis: Vec<String>,
     /// Errors thrown by page scripts, one entry per failure.
     pub script_errors: Vec<String>,
+    /// Promise rejections nothing handled. Usually the only trace of an async
+    /// bootstrap that gave up part way.
+    pub unhandled_rejections: Vec<String>,
     pub scripts_total: usize,
     pub scripts_failed: usize,
     /// Modules the page tried to import that were not in the prefetched graph.
@@ -154,6 +157,64 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
     }
 
     (scripts, external)
+}
+
+/// Unhandled promise rejections, captured out of QuickJS itself.
+///
+/// This is the difference between "the page did nothing and said nothing" and
+/// an actual cause. An async chain that rejects with no handler — a failed
+/// dynamic import, a framework bootstrap that throws inside a `then` — is
+/// otherwise completely invisible: no script error, no console output, no
+/// tools, nothing to act on.
+///
+/// rquickjs 0.6 exposes no safe API for this, so it goes through the raw
+/// QuickJS binding. Single-threaded by construction, hence thread-local.
+thread_local! {
+    static REJECTIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// # Safety
+/// Installed as a QuickJS callback; pointers are supplied by the engine and
+/// valid for the duration of the call.
+unsafe extern "C" fn on_promise_rejection(
+    ctx: *mut rquickjs::qjs::JSContext,
+    _promise: rquickjs::qjs::JSValue,
+    reason: rquickjs::qjs::JSValue,
+    is_handled: std::os::raw::c_int,
+    _opaque: *mut std::os::raw::c_void,
+) {
+    // QuickJS reports a rejection twice: once when it happens, and again if a
+    // handler is attached later. Only the unhandled report is interesting.
+    if is_handled != 0 {
+        return;
+    }
+    unsafe fn to_string(ctx: *mut rquickjs::qjs::JSContext, v: rquickjs::qjs::JSValue) -> Option<String> {
+        let mut len: rquickjs::qjs::size_t = 0;
+        let raw = rquickjs::qjs::JS_ToCStringLen2(ctx, &mut len, v, 0);
+        if raw.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(raw as *const u8, len as usize);
+        let out = String::from_utf8_lossy(bytes).into_owned();
+        rquickjs::qjs::JS_FreeCString(ctx, raw);
+        Some(out)
+    }
+
+    let mut text = to_string(ctx, reason).unwrap_or_else(|| "<unprintable rejection>".into());
+
+    // The message alone rarely identifies the culprit — "not a function" could
+    // be anywhere. The first stack frame usually does.
+    let key = std::ffi::CString::new("stack").unwrap();
+    let stack_val = rquickjs::qjs::JS_GetPropertyStr(ctx, reason, key.as_ptr());
+    if let Some(stack) = to_string(ctx, stack_val) {
+        if let Some(frame) = stack.lines().map(str::trim).find(|l| !l.is_empty()) {
+            text.push_str("  |  ");
+            text.push_str(frame);
+        }
+    }
+    rquickjs::qjs::JS_FreeValue(ctx, stack_val);
+
+    REJECTIONS.with(|r| r.borrow_mut().push(text));
 }
 
 /// A loader that remembers what it was asked for and could not provide.
@@ -303,6 +364,18 @@ impl Page {
             // argument looks alike, and a binding typed to `String` would make
             // `console.error(someObject)` throw into the page — instrumentation
             // breaking the very render it was meant to observe.
+            // Install the rejection tracker before any page code runs.
+            REJECTIONS.with(|r| r.borrow_mut().clear());
+            unsafe {
+                let raw_ctx = ctx.as_raw().as_ptr();
+                let raw_rt = rquickjs::qjs::JS_GetRuntime(raw_ctx);
+                rquickjs::qjs::JS_SetHostPromiseRejectionTracker(
+                    raw_rt,
+                    Some(on_promise_rejection),
+                    std::ptr::null_mut(),
+                );
+            }
+
             let log = Function::new(ctx.clone(), |line: String| {
                 tracing::debug!(target: "page", "{line}");
             })?;
@@ -505,6 +578,16 @@ impl Page {
         // A module the page reached for that we never fetched is the single
         // most actionable failure there is, so report it as its own class
         // rather than leaving it buried in a link error.
+        self.diagnostics.unhandled_rejections = REJECTIONS.with(|r| {
+            let mut seen: Vec<String> = Vec::new();
+            for m in r.borrow().iter() {
+                if !seen.contains(m) {
+                    seen.push(m.clone());
+                }
+            }
+            seen
+        });
+
         let misses = self.module_misses.borrow();
         if !misses.is_empty() {
             let mut unique: Vec<&String> = Vec::new();
