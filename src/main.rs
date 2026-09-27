@@ -55,11 +55,17 @@ enum Command {
 // QuickJS contexts are not `Send`, so everything stays on one thread.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    // A bare level is scoped to our own targets. Otherwise `CONDUIT_LOG=debug`
+    // also turns on html5ever's tree-builder, which drowns the page's console
+    // output in tokenizer noise — and the page's console is the entire reason
+    // to turn logging up.
+    let filter = match std::env::var("CONDUIT_LOG") {
+        Ok(v) if v.contains('=') => v,
+        Ok(v) if !v.trim().is_empty() => format!("conduit={v},page={v}"),
+        _ => "warn".to_string(),
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("CONDUIT_LOG")
-                .unwrap_or_else(|_| "warn".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
         .with_writer(std::io::stderr)
         .init();
 

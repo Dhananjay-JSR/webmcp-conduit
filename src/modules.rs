@@ -26,7 +26,11 @@ pub fn import_specifiers(source: &str) -> Vec<String> {
             // `import "x"`, `import d from "x"`, `import {a, b} from "x"`,
             // `import * as ns from "x"`. \bimport\b will not match
             // `important`, because there is no word boundary mid-word.
-            Regex::new(r#"\bimport\b\s*(?:[\w${},*\s]+?\s+from\s*)?["']([^"']+)["']"#).unwrap(),
+            //
+            // The whitespace before `from` is optional on purpose: minified
+            // bundles emit `import{X as y}from"z"`, and requiring a space
+            // there makes every such import invisible to the graph walk.
+            Regex::new(r#"\bimport\b\s*(?:[\w${},*\s]+?\s*from\s*)?["']([^"']+)["']"#).unwrap(),
             // `export { x } from "y"` — only the re-export form has a specifier.
             Regex::new(r#"\bexport\b[^;]*?\bfrom\b\s*["']([^"']+)["']"#).unwrap(),
             // `export * from "y"`
@@ -56,16 +60,26 @@ pub fn import_specifiers(source: &str) -> Vec<String> {
 pub async fn prefetch_graph(
     client: &reqwest::Client,
     entries: Vec<(String, String)>,
+    preloaded: Vec<(String, String)>,
     page_origin: &str,
 ) -> (HashMap<String, String>, Vec<String>) {
     let mut sources: HashMap<String, String> = HashMap::new();
     let mut errors = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, String)> = VecDeque::new();
+    let mut roots: HashSet<String> = HashSet::new();
 
     for (url, src) in entries {
         seen.insert(url.clone());
+        roots.insert(url.clone());
         queue.push_back((url, src));
+    }
+    // Preloaded modules are real modules: they belong in the loader map, and
+    // their own imports have to be walked too.
+    for (url, src) in preloaded {
+        if seen.insert(url.clone()) {
+            queue.push_back((url, src));
+        }
     }
 
     while let Some((url, src)) = queue.pop_front() {
@@ -91,7 +105,12 @@ pub async fn prefetch_graph(
             }
         }
 
-        sources.insert(url, src);
+        // Roots are seeded only to discover what they import; the host
+        // evaluates them directly. Registering a classic script as a module
+        // would let an import resolve to something that was never a module.
+        if !roots.contains(&url) {
+            sources.insert(url, src);
+        }
     }
 
     (sources, errors)
@@ -125,6 +144,22 @@ mod tests {
         // `export const` has no specifier; `important` is not `import`.
         let specs = import_specifiers("export const important = 'no';");
         assert!(specs.is_empty(), "got {specs:?}");
+    }
+
+    #[test]
+    fn finds_minified_imports() {
+        // Real-world CDN output has no whitespace to lean on. esm.sh serves
+        // exactly this shape, and missing it means the module graph comes up
+        // short and QuickJS fails to link.
+        let src = r#"import{EventEmitter as g}from"/node/events.mjs"
+import{ReadStream as f,WriteStream as p}from"/node/tty.mjs"
+import"/node/buffer.mjs"
+export{a as b}from"/node/util.mjs""#;
+        let specs = import_specifiers(src);
+        assert!(specs.contains(&"/node/events.mjs".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"/node/tty.mjs".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"/node/buffer.mjs".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"/node/util.mjs".to_string()), "got {specs:?}");
     }
 
     #[test]

@@ -84,15 +84,30 @@ impl Session {
             }
             // Imports must all be in hand before evaluation: QuickJS resolves
             // module specifiers synchronously and cannot await a fetch.
+            //
+            // Classic scripts are seeded too, not just modules. Modern
+            // bundlers bootstrap the whole application from a classic inline
+            // script that does `import("/assets/entry.js")`, so skipping them
+            // means the app never loads and nothing ever registers.
             let entries: Vec<(String, String)> = scripts
                 .iter()
-                .filter(|s| s.is_module && !s.source.trim().is_empty())
+                .filter(|s| !s.source.trim().is_empty())
                 .map(|s| (s.name.clone(), s.source.clone()))
                 .collect();
-            let (module_graph, module_errors) = if entries.is_empty() {
+            // `<link rel="modulepreload">` names modules the page will import
+            // at runtime through IDs we cannot see in any source.
+            let mut preloaded: Vec<(String, String)> = Vec::new();
+            for u in isolate::collect_modulepreloads(&html, &base) {
+                match fetch::script(&client, &u, &origin).await {
+                    Ok(src) => preloaded.push((u.to_string(), src)),
+                    Err(e) => diagnostics.script_errors.push(format!("{u}: {e}")),
+                }
+            }
+
+            let (module_graph, module_errors) = if entries.is_empty() && preloaded.is_empty() {
                 (Default::default(), Vec::new())
             } else {
-                crate::modules::prefetch_graph(&client, entries, &origin).await
+                crate::modules::prefetch_graph(&client, entries, preloaded, &origin).await
             };
             diagnostics.script_errors.extend(module_errors);
 

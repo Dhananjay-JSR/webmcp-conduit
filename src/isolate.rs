@@ -139,20 +139,52 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
     (scripts, external)
 }
 
+/// Modules the document declares via `<link rel="modulepreload">`.
+///
+/// These matter more than they look. A framework that resolves module IDs at
+/// runtime — React Server Components picking a client component out of a
+/// manifest, for instance — imports specifiers that appear nowhere in any
+/// source we can scan. The browser is told about them through modulepreload,
+/// and so are we.
+pub fn collect_modulepreloads(html: &str, base: &url::Url) -> Vec<url::Url> {
+    let doc = Html::parse_document(html);
+    let sel = Selector::parse("link[rel~=modulepreload][href]").unwrap();
+    let mut out: Vec<url::Url> = Vec::new();
+    for el in doc.select(&sel) {
+        if let Some(href) = el.value().attr("href") {
+            if let Ok(u) = base.join(href) {
+                if !out.contains(&u) {
+                    out.push(u);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Resolves module specifiers the way the web does: as URLs relative to the
 /// importing module. QuickJS resolves synchronously, so every module in the
 /// graph must already be in the loader's map by this point.
-struct UrlResolver;
+struct UrlResolver {
+    /// The document URL, used when the importer has no usable base of its own.
+    /// A dynamic `import()` inside a *classic* script has no module identity,
+    /// so QuickJS hands us an empty base — and a bare "/assets/app.js" would
+    /// otherwise resolve to nothing and miss the loader map entirely.
+    page: String,
+}
 
 impl Resolver for UrlResolver {
     fn resolve(&mut self, _ctx: &Ctx<'_>, base: &str, name: &str) -> rquickjs::Result<String> {
         if let Ok(absolute) = url::Url::parse(name) {
             return Ok(absolute.to_string());
         }
-        match url::Url::parse(base).and_then(|b| b.join(name)) {
-            Ok(u) => Ok(u.to_string()),
-            Err(_) => Ok(name.to_string()),
+        if let Ok(u) = url::Url::parse(base).and_then(|b| b.join(name)) {
+            return Ok(u.to_string());
         }
+        if let Ok(u) = url::Url::parse(&self.page).and_then(|b| b.join(name)) {
+            return Ok(u.to_string());
+        }
+        Ok(name.to_string())
     }
 }
 
@@ -200,14 +232,14 @@ impl Page {
         let rt = Runtime::new().context("creating QuickJS runtime")?;
         // Page scripts are untrusted. Cap memory and stack so a hostile or
         // merely broken page cannot take the process down with it.
-        rt.set_memory_limit(64 * 1024 * 1024);
+        rt.set_memory_limit(128 * 1024 * 1024);
         rt.set_max_stack_size(1024 * 1024);
 
         let mut loader = BuiltinLoader::default();
         for (name, source) in &modules {
             loader.add_module(name.clone(), source.clone());
         }
-        rt.set_loader(UrlResolver, loader);
+        rt.set_loader(UrlResolver { page: url.to_string() }, loader);
 
         let ctx = Context::full(&rt).context("creating QuickJS context")?;
         let _origin = url.origin().ascii_serialization();
