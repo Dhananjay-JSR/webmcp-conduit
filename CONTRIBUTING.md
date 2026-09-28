@@ -125,9 +125,12 @@ cargo test
 git commit -am "Release v0.2.0"
 ```
 
-Merging that PR tags `v0.2.0` and publishes it. Ordinary merges — README
-fixes, CI changes — do nothing, because the version has not moved and the tag
-already exists.
+Merging that PR publishes `v0.2.0`. Ordinary merges — README fixes, CI changes
+— do nothing, because that version has already been released.
+
+The tag is created *with* the release, after every binary has built and run,
+so the two appear together or not at all. A failed build leaves nothing
+behind, and a re-run is clean.
 
 Pushing a tag by hand still works for a release that does not come from a
 merge. Either way the workflow refuses to build if a tag and `Cargo.toml`

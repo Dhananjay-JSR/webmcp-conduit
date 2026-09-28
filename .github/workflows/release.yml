@@ -59,24 +59,23 @@ jobs:
             exit 0
           fi
 
-          # Pushed to main: release only when this version has no tag yet, so
-          # ordinary merges do nothing.
-          if git rev-parse "v$manifest_version" >/dev/null 2>&1; then
-            echo "v$manifest_version already tagged; nothing to release"
+          # Pushed to main: release only when this version has not been
+          # released yet, so ordinary merges do nothing.
+          #
+          # The question is deliberately "is there a release?" rather than "is
+          # there a tag?". The tag is created with the release at the end, so
+          # asking about tags would let a half-finished run block a retry.
+          if gh release view "v$manifest_version" >/dev/null 2>&1; then
+            echo "v$manifest_version is already released; nothing to do"
             echo "release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "v$manifest_version is new; cutting a release"
+          echo "v$manifest_version is not released yet; cutting one"
           echo "release=true" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      - name: Tag it
-        if: steps.v.outputs.release == 'true' && github.ref_type != 'tag'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.v.outputs.version }}" -m "conduit v${{ steps.v.outputs.version }}"
-          git push origin "v${{ steps.v.outputs.version }}"
 
   build:
     name: ${{ matrix.target }}
@@ -171,7 +170,11 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
+          # Creates the tag as part of publishing, against this commit. Tag and
+          # release then appear together or not at all, so a failed build
+          # leaves nothing behind and a re-run is clean.
           tag_name: v${{ needs.verify.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: conduit ${{ needs.verify.outputs.version }}
           generate_release_notes: true
           body: |
