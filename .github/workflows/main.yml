@@ -18,7 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest]
+        # Intel macOS is absent on purpose. Those runners are being retired
+        # and queue for many minutes, which would hold up every push to main.
+        # The release workflow still builds and *runs* that binary before
+        # publishing it, so the target is verified where it matters.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
