@@ -61,7 +61,10 @@ impl Session {
             (fetched.html, fetched.final_url)
         };
 
+        // `<base href>` redirects every relative URL on the page. The origin
+        // policy still keys off where the document actually came from.
         let origin = base.origin().ascii_serialization();
+        let doc_base = isolate::document_base(&html, &base);
         let prefix = tool::host_prefix(base.host_str().unwrap_or("local"));
 
         // L0 — always runs. No JavaScript involved.
@@ -73,7 +76,7 @@ impl Session {
         let mut engine = Engine::Static;
 
         if allow_scripts {
-            let (mut scripts, external) = isolate::collect_script_refs(&html, &base);
+            let (mut scripts, external) = isolate::collect_script_refs(&html, &doc_base);
             for (idx, url) in external {
                 match fetch::script(&client, &url, &origin).await {
                     Ok(src) => scripts[idx].source = src,
@@ -97,7 +100,7 @@ impl Session {
             // `<link rel="modulepreload">` names modules the page will import
             // at runtime through IDs we cannot see in any source.
             let mut preloaded: Vec<(String, String)> = Vec::new();
-            for u in isolate::collect_modulepreloads(&html, &base) {
+            for u in isolate::collect_modulepreloads(&html, &doc_base) {
                 match fetch::script(&client, &u, &origin).await {
                     Ok(src) => preloaded.push((u.to_string(), src)),
                     Err(e) => diagnostics.script_errors.push(format!("{u}: {e}")),
@@ -111,7 +114,7 @@ impl Session {
             };
             diagnostics.script_errors.extend(module_errors);
 
-            let loaded = Page::load(&html, &base, scripts, module_graph)?;
+            let loaded = Page::load(&html, &base, &doc_base, scripts, module_graph)?;
             diagnostics = isolate::Diagnostics {
                 script_errors: {
                     let mut all = diagnostics.script_errors;

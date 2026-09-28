@@ -380,6 +380,23 @@ fn fetch_module_sync(page_origin: &str, name: &str) -> Option<String> {
 /// manifest, for instance — imports specifiers that appear nowhere in any
 /// source we can scan. The browser is told about them through modulepreload,
 /// and so are we.
+/// The document's base URL, honouring `<base href>`.
+///
+/// Every relative URL on the page — scripts, modules, preloads, form actions —
+/// resolves against this rather than the document's own address. Ignoring it
+/// silently resolves everything to the wrong place.
+pub fn document_base(html: &str, url: &url::Url) -> url::Url {
+    let doc = Html::parse_document(html);
+    let Ok(sel) = Selector::parse("base[href]") else {
+        return url.clone();
+    };
+    doc.select(&sel)
+        .next()
+        .and_then(|el| el.value().attr("href"))
+        .and_then(|href| url.join(href).ok())
+        .unwrap_or_else(|| url.clone())
+}
+
 pub fn collect_modulepreloads(html: &str, base: &url::Url) -> Vec<url::Url> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("link[rel~=modulepreload][href]").unwrap();
@@ -460,6 +477,7 @@ impl Page {
     pub fn load(
         html: &str,
         url: &url::Url,
+        doc_base: &url::Url,
         scripts: Vec<Script>,
         modules: HashMap<String, String>,
     ) -> Result<Self> {
@@ -477,7 +495,7 @@ impl Page {
         }
         let misses: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         rt.set_loader(
-            UrlResolver { page: url.to_string() },
+            UrlResolver { page: doc_base.to_string() },
             RecordingLoader {
                 inner: loader,
                 misses: Rc::clone(&misses),
@@ -912,7 +930,7 @@ mod tests {
         let url = url::Url::parse("https://todo.example/app").unwrap();
         let (scripts, external) = collect_script_refs(TODO, &url);
         assert!(external.is_empty(), "fixture should have no external scripts");
-        Page::load(TODO, &url, scripts, HashMap::new()).expect("page should load")
+        Page::load(TODO, &url, &url, scripts, HashMap::new()).expect("page should load")
     }
 
     fn load_module_fixture() -> Page {
@@ -920,7 +938,7 @@ mod tests {
         let (scripts, external) = collect_script_refs(MODULE_TODO, &url);
         assert!(external.is_empty());
         assert!(scripts.iter().any(|s| s.is_module), "fixture must use a module");
-        Page::load(MODULE_TODO, &url, scripts, HashMap::new()).expect("page should load")
+        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new()).expect("page should load")
     }
 
     #[test]
@@ -1045,7 +1063,7 @@ mod tests {
             import "./never-fetched.js";
         </script></body></html>"#;
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
         assert!(
             page.diagnostics
                 .unresolved_modules
@@ -1165,7 +1183,7 @@ mod tests {
         let url = url::Url::parse("https://plain.example/").unwrap();
         let html = "<html><body><script>var x = 1;</script></body></html>";
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
         assert_eq!(page.diagnostics.model_context_lookups, 0);
         assert_eq!(page.diagnostics.register_calls, 0);
         assert_eq!(page.diagnostics.scripts_failed, 0);
@@ -1182,7 +1200,7 @@ mod tests {
             document.modelContext.getTools().then(function(){});
         </script></body></html>"#;
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
         assert_eq!(page.diagnostics.register_calls, 0);
         assert!(page.diagnostics.consume_calls > 0, "getTools should count as consumption");
     }
@@ -1242,6 +1260,32 @@ mod tests {
         assert_eq!(v["ok"], json!(true), "UTF-8 round trip failed: {out}");
         // 27 characters, 32 bytes in UTF-8. Equal counts would mean latin-1.
         assert_eq!(v["b"], json!(32), "not UTF-8 byte length: {out}");
+    }
+
+    #[test]
+    fn base_href_redirects_relative_urls() {
+        // `<base href>` changes where every relative URL on the page points.
+        // Ignoring it resolves scripts, modules and preloads against the
+        // document's own address, which is silently the wrong server.
+        let url = url::Url::parse("https://mirror.example/copy/page.html").unwrap();
+        let html = r#"<html><head><base href="https://origin.example/app/">
+            <link rel="modulepreload" href="/assets/a.js">
+            <script src="./b.js"></script></head><body></body></html>"#;
+
+        let base = document_base(html, &url);
+        assert_eq!(base.as_str(), "https://origin.example/app/");
+
+        let pre = collect_modulepreloads(html, &base);
+        assert_eq!(pre[0].as_str(), "https://origin.example/assets/a.js");
+
+        let (_, external) = collect_script_refs(html, &base);
+        assert_eq!(external[0].1.as_str(), "https://origin.example/app/b.js");
+    }
+
+    #[test]
+    fn document_base_defaults_to_the_document_url() {
+        let url = url::Url::parse("https://a.example/x/page.html").unwrap();
+        assert_eq!(document_base("<html><body></body></html>", &url), url);
     }
 
     #[test]
