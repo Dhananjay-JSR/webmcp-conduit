@@ -4,6 +4,7 @@
 //! other end is an ordinary MCP client that has never heard of WebMCP.
 
 mod declarative;
+mod cookies;
 mod fetch;
 mod isolate;
 mod mcp;
@@ -192,12 +193,19 @@ fn commit_session(handle: Option<&mut session::Handle>, loaded: &mut mcp::Sessio
     match loaded.snapshot() {
         Ok(Some(storage)) => {
             let origin = loaded.origin();
-            match handle.commit(&origin, &storage) {
+            match handle.commit(&origin, &storage, loaded.cookies()) {
                 Ok(path) => tracing::debug!(target: "conduit", "session saved to {}", path.display()),
                 Err(e) => eprintln!("conduit: could not save session {}: {e}", handle.id()),
             }
         }
-        Ok(None) => {} // No engine ran; there is nothing to save.
+        Ok(None) => {
+            // No engine ran, but the document fetch may still have been handed
+            // cookies, and a --no-scripts run should not throw a login away.
+            let origin = loaded.origin();
+            if let Err(e) = handle.commit(&origin, "{}", loaded.cookies()) {
+                eprintln!("conduit: could not save session {}: {e}", handle.id());
+            }
+        }
         Err(e) => eprintln!("conduit: could not snapshot session {}: {e}", handle.id()),
     }
     Ok(())

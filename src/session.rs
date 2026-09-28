@@ -263,7 +263,14 @@ impl Handle {
     }
 
     /// Record what the page ended up holding, and write it out.
-    pub fn commit(&mut self, origin: &str, storage_json: &str) -> Result<PathBuf> {
+    pub fn commit(
+        &mut self,
+        origin: &str,
+        storage_json: &str,
+        cookies: Vec<Cookie>,
+    ) -> Result<PathBuf> {
+        self.state.cookies = cookies;
+
         let blob: serde_json::Value = serde_json::from_str(storage_json)
             .context("parsing the storage snapshot the page produced")?;
 

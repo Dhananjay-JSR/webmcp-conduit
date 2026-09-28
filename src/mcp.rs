@@ -30,6 +30,7 @@ pub struct Session {
     untrusted: HashMap<String, bool>,
     client: reqwest::Client,
     base: Url,
+    jar: crate::cookies::SharedJar,
     pub engine: Engine,
     pub diagnostics: isolate::Diagnostics,
     pub prefix: String,
@@ -47,6 +48,14 @@ impl Session {
 
     /// The key a session files this page's storage under. Matches what was
     /// used to restore it, including the file:// special case.
+    /// The cookies this run ended up holding, ready to store.
+    pub fn cookies(&self) -> Vec<crate::session::Cookie> {
+        self.jar
+            .lock()
+            .map(|jar| jar.to_stored())
+            .unwrap_or_default()
+    }
+
     pub fn origin(&self) -> String {
         if self.base.scheme() == "file" {
             return self.base.as_str().to_string();
@@ -61,6 +70,13 @@ impl Session {
     ) -> Result<Self> {
         let client = fetch::client()?;
 
+        // The jar is built before the first request, because the document
+        // fetch is exactly where a restored login cookie has to be sent.
+        let jar = crate::cookies::shared();
+        if let Some(handle) = session {
+            *jar.lock().unwrap() = crate::cookies::Jar::from_stored(handle.state().cookies.clone());
+        }
+
         // A local file is a first-class target: it makes the engine testable
         // without a network round trip, and it is how you debug a page.
         let (html, base) = if let Some(path) = target.strip_prefix("file://") {
@@ -73,7 +89,7 @@ impl Session {
         } else {
             let url = Url::parse(target)
                 .with_context(|| format!("`{target}` is not a URL or an existing file"))?;
-            let fetched = fetch::page(&client, &url).await?;
+            let fetched = fetch::page(&client, &url, Some(&jar)).await?;
             if fetched.tools_disabled {
                 return Err(anyhow!(
                     "{url} sends `Permissions-Policy: tools=()`. The site has \
@@ -108,7 +124,7 @@ impl Session {
         if allow_scripts {
             let (mut scripts, external) = isolate::collect_script_refs(&html, &doc_base);
             for (idx, url) in external {
-                match fetch::script(&client, &url, &origin).await {
+                match fetch::script(&client, &url, &origin, Some(&jar)).await {
                     Ok(src) => scripts[idx].source = src,
                     Err(e) => diagnostics.script_errors.push(format!("{url}: {e}")),
                 }
@@ -129,7 +145,7 @@ impl Session {
             // at runtime through IDs we cannot see in any source.
             let mut preloaded: Vec<(String, String)> = Vec::new();
             for u in isolate::collect_modulepreloads(&html, &doc_base) {
-                match fetch::script(&client, &u, &origin).await {
+                match fetch::script(&client, &u, &origin, Some(&jar)).await {
                     Ok(src) => preloaded.push((u.to_string(), src)),
                     Err(e) => diagnostics.script_errors.push(format!("{u}: {e}")),
                 }
@@ -138,7 +154,7 @@ impl Session {
             let (module_graph, module_errors) = if entries.is_empty() && preloaded.is_empty() {
                 (Default::default(), Vec::new())
             } else {
-                crate::modules::prefetch_graph(&client, entries, preloaded, &origin).await
+                crate::modules::prefetch_graph(&client, entries, preloaded, &origin, Some(&jar)).await
             };
             diagnostics.script_errors.extend(module_errors);
 
@@ -153,6 +169,7 @@ impl Session {
                 scripts,
                 module_graph,
                 restore.as_deref(),
+                Some(jar.clone()),
             )?;
             diagnostics = isolate::Diagnostics {
                 script_errors: {
@@ -195,6 +212,7 @@ impl Session {
             untrusted,
             client,
             base,
+            jar,
             engine,
             diagnostics,
             prefix,

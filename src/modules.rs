@@ -71,6 +71,7 @@ pub async fn prefetch_graph(
     entries: Vec<(String, String)>,
     preloaded: Vec<(String, String)>,
     page_origin: &str,
+    jar: Option<&crate::cookies::SharedJar>,
 ) -> (HashMap<String, String>, Vec<String>) {
     let mut sources: HashMap<String, String> = HashMap::new();
     let mut errors = Vec::new();
@@ -108,7 +109,7 @@ pub async fn prefetch_graph(
             }
             seen.insert(key.clone());
 
-            match crate::fetch::script(client, &resolved, page_origin).await {
+            match crate::fetch::script(client, &resolved, page_origin, jar).await {
                 Ok(dep) => queue.push_back((key, dep)),
                 Err(e) => errors.push(format!("{key}: {e}")),
             }
