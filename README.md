@@ -87,6 +87,10 @@ offers by using the ModelContext APIs directly."*
 Page state persists across calls. A tool that adds an item and a tool that
 lists them see the same page.
 
+For a walk through the code itself, see
+[DeepWiki](https://deepwiki.com/Dhananjay-JSR/webmcp-conduit), which reads the
+repository directly and so cannot drift out of date.
+
 ## When a page comes up empty
 
 `probe` tells you why rather than guessing. It reports script errors with
@@ -150,6 +154,13 @@ model's context. Treat every site you point this at as untrusted.
 - `untrustedContentHint` → results are fenced in an explicit
   `<untrusted-content>` block marked as data, not instructions.
 - `debugging` → filtered out before the model ever sees the tool.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: platform behaviour
+gets vendored from a maintained package, host decisions are written here, and
+anything a page can fail on should be reported by `probe` rather than guessed
+at.
 
 ## License
 
