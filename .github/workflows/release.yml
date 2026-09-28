@@ -193,13 +193,21 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
             ```
 
-            Or with cargo:
+            Or run it without installing:
+
+            ```bash
+            npx webmcp-conduit probe https://example.com
+            ```
+
+            Or from source:
 
             ```bash
             cargo install webmcp-conduit
             ```
 
-            Checksums are in `SHA256SUMS`.
+            Binaries for macOS, Linux and Windows are attached, with
+            checksums in `SHA256SUMS`. The install script verifies them.
+
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
@@ -256,7 +264,15 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::warning::NPM_TOKEN is not set; skipping npm publish"
+            echo "::warning::NPM_TOKEN is not set — nothing was published to npm."
+            echo "Add an NPM_TOKEN repository secret to publish on the next release."
+            # Marked on the summary rather than left as a silent green tick: a
+            # step that did nothing should not look like one that succeeded.
+            {
+              echo "### npm publish skipped"
+              echo ""
+              echo "\`NPM_TOKEN\` is not set, so no packages were published."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # Platform packages first: the wrapper pins them as exact
