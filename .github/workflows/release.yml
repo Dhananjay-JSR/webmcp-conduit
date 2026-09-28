@@ -86,12 +86,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native runners per architecture. The engine embeds a C
-          # interpreter, so cross-compiling costs more than it saves.
+          # Linux and Windows build on native runners. Both macOS targets
+          # build on Apple Silicon, which ships SDKs for each architecture —
+          # the Intel runners are being retired and queue long enough to
+          # stall a release indefinitely.
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  ext: "" }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: "" }
-          - { os: macos-13,         target: x86_64-apple-darwin,       ext: "" }
           - { os: macos-latest,     target: aarch64-apple-darwin,      ext: "" }
+          - { os: macos-latest,     target: x86_64-apple-darwin,       ext: "" }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,    ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
@@ -107,12 +109,19 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # Skipped for the cross-built target, since an arm64 runner cannot run
+      # an x86_64 binary. Everything else is exercised before it is packaged.
       - name: Check it runs
+        if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
           bin="target/${{ matrix.target }}/release/${BINARY}${{ matrix.ext }}"
           "$bin" --version
           "$bin" probe fixtures/todo.html | grep -q "tools: 4"
+
+      - name: Check it is the right architecture
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: file "target/${{ matrix.target }}/release/${BINARY}" | grep -q x86_64
 
       - name: Package
         shell: bash
