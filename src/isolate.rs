@@ -1323,6 +1323,42 @@ mod tests {
     }
 
     #[test]
+    fn rsc_client_components_register_tools() {
+        // The full React Server Components path: flight rows handed from
+        // classic inline scripts to a module, decoded through
+        // createFromReadableStream, unwrapped with use(), hydrated into the
+        // document — and a client component resolved from the payload by
+        // module id registering a tool from an effect.
+        //
+        // That last step is Margin's exact shape. It works here, which rules
+        // RSC out as the reason Margin registers nothing.
+        let html = include_str!("../fixtures/rsc/rsc.html");
+        let bundle = include_str!("../fixtures/rsc/rsc.js");
+        let url = url::Url::parse("https://app.example/index.html").unwrap();
+
+        let (mut scripts, external) = collect_script_refs(html, &url);
+        assert_eq!(external.len(), 1, "fixture loads one module bundle");
+        scripts[external[0].0].source = bundle.to_string();
+
+        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        assert!(
+            page.diagnostics.script_errors.is_empty(),
+            "unexpected errors: {:?}",
+            page.diagnostics.script_errors
+        );
+
+        let mut names: Vec<String> = page.harvest().unwrap().into_iter().map(|t| t.name).collect();
+        names.sort();
+        assert_eq!(names, vec!["client-ref-tool", "rsc-tool"], "got {names:?}");
+
+        // The client component both mounted and finished its effect.
+        assert_eq!(
+            page.eval_debug("document.getElementById('widget').textContent").unwrap(),
+            "widget registered"
+        );
+    }
+
+    #[test]
     fn unknown_tools_fail_cleanly() {
         let mut page = load_fixture();
         let err = page.call("no-such-tool", &json!({})).unwrap_err();
