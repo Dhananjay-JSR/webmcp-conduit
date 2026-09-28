@@ -37,7 +37,9 @@
       description: "List every todo item currently on the page",
       annotations: { readOnlyHint: true },
       execute: function () {
-        var nodes = document.querySelectorAll("#list .item");
+        // Array.from, because a real NodeList has no .map — happy-dom v14
+        // tolerated it, browsers do not.
+        var nodes = Array.from(document.querySelectorAll("#list .item"));
         return { items: nodes.map(function (n) { return n.textContent; }) };
       }
     });

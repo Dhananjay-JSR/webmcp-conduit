@@ -82,6 +82,9 @@ pub struct Diagnostics {
     /// How many times the page called `getTools` or `executeTool` — that is,
     /// used WebMCP as a client rather than providing tools of its own.
     pub consume_calls: usize,
+    /// True when the page still had queued work when the engine stopped, so
+    /// whatever it was building may simply not have finished.
+    pub settle_exhausted: bool,
 }
 
 pub struct Page {
@@ -732,6 +735,12 @@ impl Page {
                 return;
             }
         }
+
+        // Reaching here means the page was still scheduling work when we
+        // stopped. That is a materially different failure from a page that
+        // finished and registered nothing, and the two are indistinguishable
+        // from the outside without saying so.
+        self.diagnostics.settle_exhausted = true;
     }
 
     fn collect_diagnostics(&mut self) {
@@ -1212,6 +1221,27 @@ mod tests {
                 .unwrap(),
             "7"
         );
+    }
+
+    #[test]
+    fn text_encoding_round_trips_non_ascii() {
+        // A naive stub in the node:util shim was being hoisted over the real
+        // UTF-8 encoder, silently mangling every non-ASCII character — one
+        // byte per code unit, so an em dash came back as \u0014. It broke
+        // JSON payloads on any page that is not pure ASCII, which is most of
+        // them, and it failed quietly.
+        let page = load_fixture();
+        let out = page
+            .eval_debug(
+                "(function(){ var s='Margin — Local-first ✓ café'; \
+                 var e=new TextEncoder().encode(s); \
+                 return JSON.stringify({b:e.length, ok:new TextDecoder().decode(e)===s}); })()",
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], json!(true), "UTF-8 round trip failed: {out}");
+        // 27 characters, 32 bytes in UTF-8. Equal counts would mean latin-1.
+        assert_eq!(v["b"], json!(32), "not UTF-8 byte length: {out}");
     }
 
     #[test]

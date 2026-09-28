@@ -18,13 +18,28 @@
       url: globalThis.__CONDUIT_URL__ || "about:blank",
       width: 1280,
       height: 800,
+      settings: {
+        // conduit fetches and evaluates page scripts itself, under its own
+        // origin policy. Leaving happy-dom to also load them means a second,
+        // unpoliced network path — and its loader reaches for node:https,
+        // which does not exist here.
+        disableJavaScriptFileLoading: true,
+        disableCSSFileLoading: true,
+        // No layout engine, so computed style is guesswork either way.
+        disableComputedStyleRendering: true,
+        // A blocked resource should look like an empty success rather than an
+        // error: pages routinely pull analytics and fonts we do not need, and
+        // a rejection there would bury the failures that matter.
+        handleDisabledFileLoadingAsSuccess: true,
+      },
     });
   } catch (e) {
+    var frames = String((e && e.stack) || "").split("\n").map(function (l) {
+      return l.trim();
+    }).filter(Boolean).slice(0, 5).join("  <  ");
     throw new Error(
       "constructing happy-dom Window failed: " + String((e && e.message) || e) +
-      " [Window is " + typeof Window +
-      ", URL is " + typeof globalThis.URL +
-      ", url=" + String(globalThis.__CONDUIT_URL__) + "]"
+      (frames ? "  |  " + frames : "")
     );
   }
   globalThis.__conduit_window = win;
@@ -142,6 +157,39 @@
   } catch (e) {
     try { doc.defaultView = globalThis; } catch (e2) {}
   }
+
+  // ----------------------------------------------------- error capture
+  // React routes errors it handles through reportError and the window error
+  // event rather than throwing. Without these, a framework that catches an
+  // error and renders a fallback looks identical to one that succeeded and
+  // simply had nothing to do.
+  globalThis.reportError = function (e) {
+    globalThis.__conduit_errors.push(
+      "reportError: " + String((e && e.message) || e) +
+      (e && e.stack ? "  |  " + String(e.stack).split("\n")[0].trim() : "")
+    );
+  };
+  globalThis.addEventListener("error", function (ev) {
+    var err = (ev && ev.error) || ev;
+    var where = "";
+    if (err && err.stack) {
+      var frames = String(err.stack).split("\n").map(function (l) {
+        return l.trim();
+      }).filter(Boolean).slice(0, 4);
+      if (frames.length) where = "  |  " + frames.join("  <  ");
+    } else if (ev && ev.filename) {
+      where = "  |  " + ev.filename + ":" + (ev.lineno || 0) + ":" + (ev.colno || 0);
+    }
+    globalThis.__conduit_errors.push(
+      "window.onerror: " + String((err && err.message) || ev.message || err) + where
+    );
+  });
+  globalThis.addEventListener("unhandledrejection", function (ev) {
+    var r = ev && ev.reason;
+    globalThis.__conduit_errors.push(
+      "unhandledrejection: " + String((r && r.message) || r)
+    );
+  });
 
   // ------------------------------------------------------ instrumentation
   // happy-dom implements the DOM but is still not a browser: there is no

@@ -38,14 +38,23 @@ npm run build
 
 That rewrites `src/js/vendor/happy-dom.js` and refreshes the bundled LICENSE.
 
-## Why `happy-dom-without-node`
+## Mainline happy-dom, and the stubs it needs
 
-Mainline happy-dom pulls in `ws` and real Node streams for WebSocket support,
-which does not load under QuickJS. The `-without-node` build drops those.
+This builds mainline happy-dom rather than the `-without-node` fork, which
+lagged six major versions behind. Three stubs make it load under QuickJS:
 
-It does lag mainline. Moving to current happy-dom is possible — it parses and
-loads under QuickJS with `ws` aliased out and the Node builtins stubbed — but
-Window construction needs a few more shims than are in `host-pre.js` today.
+- **`ws`** is aliased out entirely. happy-dom bundles it for WebSocket, it
+  needs real Node streams, and a harvest never opens a socket.
+- **`vm.isContext()` returns true.** happy-dom makes its Window the global of
+  a real VM context; returning true makes that setup a no-op, which is the
+  right answer here because `host-post.js` hoists the Window onto globalThis
+  anyway — that is what a browser gives you.
+- **`util` re-exports the real TextEncoder/TextDecoder** instead of defining
+  its own. A naive stand-in there gets hoisted over the correct one and
+  corrupts every non-ASCII character on the page, quietly.
+
+v20 also wants `WeakRef`, which QuickJS lacks; `host-pre.js` supplies a
+strong-reference stand-in.
 
 ## Why not a real browser
 

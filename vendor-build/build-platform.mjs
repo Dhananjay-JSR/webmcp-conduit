@@ -2,7 +2,7 @@ import * as esbuild from 'esbuild';
 const mods = ['fs','path','vm','http','https','stream','crypto','zlib','url',
               'child_process','net','tls','os','perf_hooks','buffer','util',
               'events','string_decoder','querystring','worker_threads','timers','assert','punycode'];
-const alias = {};
+const alias = { ws: './stubs/ws.js' };
 for (const m of mods) { alias[m] = `./stubs/${m}.js`; alias[`node:${m}`] = `./stubs/${m}.js`; }
 alias['stream/web'] = './stubs/stream_web.js';
 alias['node:stream/web'] = './stubs/stream_web.js';
@@ -52,4 +52,10 @@ await esbuild.build({
   entryPoints: ['storage-entry.js'],
   outfile: '../src/js/vendor/storage.js',
 });
+await esbuild.build({
+  ...common,
+  entryPoints: ['happydom-entry.js'],
+  outfile: '../src/js/vendor/happy-dom.js',
+});
+
 console.log('BUILD OK');

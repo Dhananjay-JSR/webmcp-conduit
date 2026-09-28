@@ -203,6 +203,13 @@ fn print_report(session: &mcp::Session, target: &str) {
         }
     }
 
+    if d.settle_exhausted {
+        println!();
+        println!("  The page was still scheduling work when the engine stopped.");
+        println!("  Whatever it was building may simply not have finished, which");
+        println!("  is different from finishing and registering nothing.");
+    }
+
     if !d.unhandled_rejections.is_empty() {
         println!();
         println!("  Unhandled promise rejections ({}):", d.unhandled_rejections.len());

@@ -221,6 +221,19 @@
     } catch (e) { /* frozen prototype; nothing to do */ }
   }
 
+  // QuickJS has no weak references. A strong-reference stand-in is
+  // functionally correct — it only forgoes the collection behaviour, and a
+  // harvest is short-lived enough that nothing depends on that.
+  if (typeof globalThis.WeakRef === "undefined") {
+    globalThis.WeakRef = function WeakRef(target) { this._target = target; };
+    globalThis.WeakRef.prototype.deref = function () { return this._target; };
+  }
+  if (typeof globalThis.FinalizationRegistry === "undefined") {
+    globalThis.FinalizationRegistry = function FinalizationRegistry() {};
+    globalThis.FinalizationRegistry.prototype.register = function () {};
+    globalThis.FinalizationRegistry.prototype.unregister = function () { return false; };
+  }
+
   if (typeof globalThis.SharedArrayBuffer === "undefined") {
     globalThis.SharedArrayBuffer = function SharedArrayBuffer() {
       throw new Error("SharedArrayBuffer is not available in conduit");
