@@ -42,7 +42,8 @@ https://example.com
 ```
 
 Add it to an MCP client — Claude Desktop, Claude Code, Cursor, anything that
-takes a command:
+takes a command. There is no port and no daemon: the client launches `conduit`
+as a child process and talks to it over stdin and stdout.
 
 ```json
 {
@@ -85,8 +86,6 @@ offers by using the ModelContext APIs directly."*
 
 Page state persists across calls. A tool that adds an item and a tool that
 lists them see the same page.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture.
 
 ## When a page comes up empty
 
