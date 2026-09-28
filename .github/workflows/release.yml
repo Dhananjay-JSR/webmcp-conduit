@@ -1,10 +1,17 @@
 name: release
 
-# Cutting a release is `git tag v0.1.0 && git push --tags`. Everything below
-# follows from that: binaries for every platform, checksums, and a GitHub
-# release the install script can read.
+# A release is cut by the version in Cargo.toml changing on main. Merge a
+# version bump and everything below follows: a tag, binaries for every
+# platform, checksums, a GitHub release, and npm packages.
+#
+# Not every merge releases — most are README fixes and CI tweaks, and tagging
+# those would be noise. The version bump is the signal.
+#
+# Pushing a tag by hand still works, for a release that does not come from a
+# merge.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -23,27 +30,58 @@ jobs:
   # A tag that disagrees with Cargo.toml produces a release whose binaries
   # report a different version than the tag promises. Fail before building.
   verify:
-    name: verify version
+    name: check version
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - id: v
+        name: Decide whether this is a release
         run: |
-          tag="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
-          tag_version="${tag#v}"
           manifest_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "tag=$tag_version manifest=$manifest_version"
-          if [ "$tag_version" != "$manifest_version" ]; then
-            echo "::error::tag $tag does not match Cargo.toml version $manifest_version"
-            exit 1
+          echo "manifest version: $manifest_version"
+          echo "version=$manifest_version" >> "$GITHUB_OUTPUT"
+
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            # A tag that disagrees with Cargo.toml would publish binaries
+            # reporting a version the tag does not promise.
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$manifest_version" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version $manifest_version"
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+          # Pushed to main: release only when this version has no tag yet, so
+          # ordinary merges do nothing.
+          if git rev-parse "v$manifest_version" >/dev/null 2>&1; then
+            echo "v$manifest_version already tagged; nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "v$manifest_version is new; cutting a release"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Tag it
+        if: steps.v.outputs.release == 'true' && github.ref_type != 'tag'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.v.outputs.version }}" -m "conduit v${{ steps.v.outputs.version }}"
+          git push origin "v${{ steps.v.outputs.version }}"
 
   build:
     name: ${{ matrix.target }}
     needs: verify
+    if: needs.verify.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -109,6 +147,7 @@ jobs:
   publish:
     name: publish release
     needs: [verify, build]
+    if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,7 +171,7 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: v${{ needs.verify.outputs.version }}
           name: conduit ${{ needs.verify.outputs.version }}
           generate_release_notes: true
           body: |
@@ -162,10 +201,8 @@ jobs:
   npm:
     name: publish to npm
     needs: [verify, build]
+    if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
-    # Skipped rather than failed when the token is absent, so a release still
-    # completes for anyone who has not set it up.
-    if: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
 

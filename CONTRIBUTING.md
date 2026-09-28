@@ -114,21 +114,29 @@ it first.
 
 ## Releasing
 
-Versions are driven by the tag, and the release workflow refuses to build if
-the tag and `Cargo.toml` disagree — otherwise the binaries report a different
-version than the tag promises.
+A release is cut by **the version in `Cargo.toml` changing on main**. Bump it,
+merge, and the rest follows — tag, binaries, checksums, GitHub release, npm
+packages.
 
 ```bash
-# bump the version in Cargo.toml, then
+# in a PR
 cargo test
+# bump `version` in Cargo.toml
 git commit -am "Release v0.2.0"
-git tag v0.2.0
-git push && git push --tags
 ```
 
-That builds binaries for Linux, macOS and Windows on x86_64 and aarch64,
-verifies each one actually runs, publishes them to a GitHub release with
-checksums, and leaves `install.sh` able to find them.
+Merging that PR tags `v0.2.0` and publishes it. Ordinary merges — README
+fixes, CI changes — do nothing, because the version has not moved and the tag
+already exists.
+
+Pushing a tag by hand still works for a release that does not come from a
+merge. Either way the workflow refuses to build if a tag and `Cargo.toml`
+disagree, since the binaries would otherwise report a version the tag does not
+promise.
+
+Each target builds on a native runner and every binary is run — `--version`
+and a real probe against a fixture — before it is packaged, so a release
+cannot contain something that does not work.
 
 `cargo publish` to crates.io is deliberately separate and manual, because it
 cannot be undone.
