@@ -202,7 +202,7 @@ jobs:
             Or from source:
 
             ```bash
-            cargo install webmcp-conduit
+            cargo install --git https://github.com/${{ github.repository }}
             ```
 
             Binaries for macOS, Linux and Windows are attached, with

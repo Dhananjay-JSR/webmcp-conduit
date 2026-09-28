@@ -35,8 +35,8 @@ curl -fsSL https://raw.githubusercontent.com/Dhananjay-JSR/webmcp-conduit/main/i
 # npm
 npm install -g webmcp-conduit
 
-# cargo
-cargo install webmcp-conduit
+# from source
+cargo install --git https://github.com/Dhananjay-JSR/webmcp-conduit
 ```
 
 One static binary. No Node, no Chromium.

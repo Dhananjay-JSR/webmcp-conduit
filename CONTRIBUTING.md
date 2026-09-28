@@ -141,8 +141,10 @@ Each target builds on a native runner and every binary is run — `--version`
 and a real probe against a fixture — before it is packaged, so a release
 cannot contain something that does not work.
 
-`cargo publish` to crates.io is deliberately separate and manual, because it
-cannot be undone.
+crates.io is deliberately not part of this. Publishing there cannot be undone —
+a version can be yanked but never replaced, and the name is claimed forever —
+and it earns little that the other channels do not already cover. Rust users
+can install from git in the meantime.
 
 ### npm packaging
 
