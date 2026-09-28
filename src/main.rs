@@ -3,13 +3,13 @@
 //! No browser. No widget on the page. No token to paste. The client on the
 //! other end is an ordinary MCP client that has never heard of WebMCP.
 
-mod declarative;
 mod cookies;
+mod declarative;
 mod fetch;
 mod isolate;
 mod mcp;
-mod session;
 mod modules;
+mod session;
 mod tool;
 
 use anyhow::Result;
@@ -194,7 +194,9 @@ fn commit_session(handle: Option<&mut session::Handle>, loaded: &mut mcp::Sessio
         Ok(Some(storage)) => {
             let origin = loaded.origin();
             match handle.commit(&origin, &storage, loaded.cookies()) {
-                Ok(path) => tracing::debug!(target: "conduit", "session saved to {}", path.display()),
+                Ok(path) => {
+                    tracing::debug!(target: "conduit", "session saved to {}", path.display())
+                }
                 Err(e) => eprintln!("conduit: could not save session {}: {e}", handle.id()),
             }
         }
@@ -258,8 +260,10 @@ fn run_session_command(command: SessionCommand) -> Result<()> {
                     if let Some(dbs) = blob.get("databases").and_then(|v| v.as_array()) {
                         for db in dbs {
                             let name = db.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                            for store_spec in
-                                db.get("stores").and_then(|v| v.as_array()).unwrap_or(&vec![])
+                            for store_spec in db
+                                .get("stores")
+                                .and_then(|v| v.as_array())
+                                .unwrap_or(&vec![])
                             {
                                 let store_name = store_spec
                                     .get("name")
@@ -270,7 +274,9 @@ fn run_session_command(command: SessionCommand) -> Result<()> {
                                     .and_then(|v| v.as_array())
                                     .map(|r| r.len())
                                     .unwrap_or(0);
-                                println!("      indexedDB     {name}/{store_name} ({count} record(s))");
+                                println!(
+                                    "      indexedDB     {name}/{store_name} ({count} record(s))"
+                                );
                             }
                         }
                     }

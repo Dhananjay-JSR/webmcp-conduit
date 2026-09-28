@@ -72,9 +72,7 @@ impl Jar {
             .filter(|c| c.expires.map(|e| e > now).unwrap_or(false))
             .cloned()
             .collect();
-        out.sort_by(|a, b| {
-            (&a.domain, &a.path, &a.name).cmp(&(&b.domain, &b.path, &b.name))
-        });
+        out.sort_by(|a, b| (&a.domain, &a.path, &a.name).cmp(&(&b.domain, &b.path, &b.name)));
         out
     }
 

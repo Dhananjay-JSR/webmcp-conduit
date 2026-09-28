@@ -154,7 +154,8 @@ impl Session {
             let (module_graph, module_errors) = if entries.is_empty() && preloaded.is_empty() {
                 (Default::default(), Vec::new())
             } else {
-                crate::modules::prefetch_graph(&client, entries, preloaded, &origin, Some(&jar)).await
+                crate::modules::prefetch_graph(&client, entries, preloaded, &origin, Some(&jar))
+                    .await
             };
             diagnostics.script_errors.extend(module_errors);
 

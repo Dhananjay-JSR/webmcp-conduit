@@ -725,9 +725,12 @@ impl Page {
                 .globals()
                 .get("__conduit_session_import")
                 .map_err(|e| anyhow!("session support missing: {e}"))?;
-            import
-                .call::<_, ()>((state_json,))
-                .map_err(|e| anyhow!("restoring session: {}", describe_exception(&ctx, &e.to_string())))
+            import.call::<_, ()>((state_json,)).map_err(|e| {
+                anyhow!(
+                    "restoring session: {}",
+                    describe_exception(&ctx, &e.to_string())
+                )
+            })
         })?;
 
         self.settle_session("restoring session")
@@ -746,9 +749,12 @@ impl Page {
                 .globals()
                 .get("__conduit_session_export")
                 .map_err(|e| anyhow!("session support missing: {e}"))?;
-            export
-                .call::<_, ()>(())
-                .map_err(|e| anyhow!("snapshotting session: {}", describe_exception(&ctx, &e.to_string())))
+            export.call::<_, ()>(()).map_err(|e| {
+                anyhow!(
+                    "snapshotting session: {}",
+                    describe_exception(&ctx, &e.to_string())
+                )
+            })
         })?;
 
         self.settle_session("snapshotting session")?;
@@ -1069,7 +1075,8 @@ mod tests {
             scripts.iter().any(|s| s.is_module),
             "fixture must use a module"
         );
-        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new(), None, None).expect("page should load")
+        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new(), None, None)
+            .expect("page should load")
     }
 
     #[test]
@@ -1462,8 +1469,8 @@ mod tests {
         let url = url::Url::parse("https://example.com/app").unwrap();
 
         let (scripts, _) = collect_script_refs(WRITES, &url);
-        let mut writer =
-            Page::load(WRITES, &url, &url, scripts, HashMap::new(), None, None).expect("writer loads");
+        let mut writer = Page::load(WRITES, &url, &url, scripts, HashMap::new(), None, None)
+            .expect("writer loads");
         let snapshot = writer.export_session().expect("snapshot succeeds");
         assert!(
             snapshot.contains("hello") && snapshot.contains("world"),
@@ -1485,17 +1492,29 @@ mod tests {
         .expect("restored page loads");
 
         let seen = restored.eval_debug("window.__seen").unwrap();
-        assert!(seen.contains("\"token\":\"abc\""), "localStorage lost: {seen}");
-        assert!(seen.contains("hello") && seen.contains("world"), "records lost: {seen}");
-        assert!(seen.contains("\"dateIsDate\":true"), "Date degraded to a string: {seen}");
+        assert!(
+            seen.contains("\"token\":\"abc\""),
+            "localStorage lost: {seen}"
+        );
+        assert!(
+            seen.contains("hello") && seen.contains("world"),
+            "records lost: {seen}"
+        );
+        assert!(
+            seen.contains("\"dateIsDate\":true"),
+            "Date degraded to a string: {seen}"
+        );
 
         // Without the snapshot the same page must see nothing, or the two
         // sessions are not actually isolated.
         let (scripts, _) = collect_script_refs(READS, &url);
-        let empty =
-            Page::load(READS, &url, &url, scripts, HashMap::new(), None, None).expect("empty page loads");
+        let empty = Page::load(READS, &url, &url, scripts, HashMap::new(), None, None)
+            .expect("empty page loads");
         let seen = empty.eval_debug("window.__seen").unwrap();
-        assert!(seen.contains("\"texts\":[]"), "a sessionless page saw data: {seen}");
+        assert!(
+            seen.contains("\"texts\":[]"),
+            "a sessionless page saw data: {seen}"
+        );
     }
 
     #[test]

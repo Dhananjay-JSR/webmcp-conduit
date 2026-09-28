@@ -170,8 +170,7 @@ impl Store {
         let dir = path
             .parent()
             .ok_or_else(|| anyhow!("session path has no parent"))?;
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
         let body = serde_json::to_string_pretty(state).context("serialising session")?;
 
