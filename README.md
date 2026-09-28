@@ -23,12 +23,19 @@ no token to paste, no separate client to install.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dhananjay-JSR/webmcp-conduit/main/install.sh | sh
+npx webmcp-conduit probe https://example.com
 ```
 
-Or from source:
+Or install it:
 
 ```bash
+# curl
+curl -fsSL https://raw.githubusercontent.com/Dhananjay-JSR/webmcp-conduit/main/install.sh | sh
+
+# npm
+npm install -g webmcp-conduit
+
+# cargo
 cargo install webmcp-conduit
 ```
 
@@ -59,8 +66,8 @@ as a child process and talks to it over stdin and stdout.
 {
   "mcpServers": {
     "example": {
-      "command": "conduit",
-      "args": ["serve", "https://example.com"]
+      "command": "npx",
+      "args": ["-y", "webmcp-conduit", "serve", "https://example.com"]
     }
   }
 }

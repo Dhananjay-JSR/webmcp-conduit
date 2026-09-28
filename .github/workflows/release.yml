@@ -153,3 +153,66 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.zip
             artifacts/SHA256SUMS
+
+  # MCP servers are installed with npx far more often than with cargo, so the
+  # binaries ship through npm too: one wrapper package listing per-platform
+  # packages as optionalDependencies, which is how esbuild and swc do it. npm
+  # installs only the package matching the machine and downloads nothing at
+  # install time.
+  npm:
+    name: publish to npm
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    # Skipped rather than failed when the token is absent, so a release still
+    # completes for anyone who has not set it up.
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract binaries by target
+        run: |
+          mkdir -p bins
+          for f in artifacts/*.tar.gz; do
+            tar xzf "$f" -C bins
+          done
+          for f in artifacts/*.zip; do
+            unzip -q "$f" -d bins
+          done
+          # build.mjs expects bins/<rust-target>/conduit, while the archives
+          # unpack to conduit-<version>-<target>/.
+          version="${{ needs.verify.outputs.version }}"
+          for d in bins/conduit-"$version"-*; do
+            [ -d "$d" ] || continue
+            target="${d#bins/conduit-$version-}"
+            mkdir -p "bins/$target"
+            cp "$d"/conduit* "bins/$target/" 2>/dev/null || true
+          done
+          find bins -maxdepth 2 -name 'conduit*' -type f | sort
+
+      - name: Build the npm packages
+        run: node npm/build.mjs "${{ needs.verify.outputs.version }}" bins
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN is not set; skipping npm publish"
+            exit 0
+          fi
+          # Platform packages first: the wrapper pins them as exact
+          # optionalDependencies and would install broken without them.
+          for dir in npm/dist/webmcp-conduit-*; do
+            (cd "$dir" && npm publish --access public --provenance)
+          done
+          (cd npm/dist/webmcp-conduit && npm publish --access public --provenance)

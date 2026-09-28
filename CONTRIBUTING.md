@@ -132,3 +132,23 @@ checksums, and leaves `install.sh` able to find them.
 
 `cargo publish` to crates.io is deliberately separate and manual, because it
 cannot be undone.
+
+### npm packaging
+
+The binaries also ship through npm, because MCP servers are installed with
+`npx` far more often than with cargo. The layout is the one esbuild and swc
+use: a wrapper package that lists per-platform packages as
+`optionalDependencies`, each carrying `os` and `cpu`. npm installs only the one
+matching the machine, and downloads nothing at install time.
+
+`npm/build.mjs` assembles them from the release binaries. To try it locally:
+
+```bash
+cargo build --release
+mkdir -p /tmp/bins/aarch64-apple-darwin
+cp target/release/conduit /tmp/bins/aarch64-apple-darwin/
+node npm/build.mjs 0.0.0-test /tmp/bins
+```
+
+Publishing needs an `NPM_TOKEN` repository secret. Without it the release still
+completes and the step warns instead of failing.
