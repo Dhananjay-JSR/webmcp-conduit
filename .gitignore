@@ -2,3 +2,10 @@
 **/*.rs.bk
 .DS_Store
 .envrc
+
+# vendor-build is tooling for regenerating the vendored JavaScript. Its
+# dependencies are not part of the project — the built bundles in
+# src/js/vendor/ are what ship, and they are checked in.
+node_modules/
+vendor-build/out/
+fixtures/**/node_modules/
