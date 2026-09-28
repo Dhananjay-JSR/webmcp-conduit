@@ -310,6 +310,69 @@ fn err(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// Handle one JSON-RPC message.
+///
+/// Transport-independent on purpose: stdio and HTTP must not drift into two
+/// subtly different servers. Returns `None` for a notification, which carries
+/// no id and must not be answered.
+pub async fn handle(session: &mut Session, target: &str, req: &Value) -> Option<Value> {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(json!({}));
+    let is_notification = req.get("id").is_none();
+
+    let response = match method {
+        "initialize" => ok(
+            id,
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": {
+                    "name": "webmcp-conduit",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "instructions": format!(
+                    "Tools exposed by {target}, discovered via WebMCP and served over \
+                     MCP by conduit (engine: {}). Tool names are prefixed with `{}` to \
+                     identify their origin site.",
+                    session.engine.as_str(), session.prefix
+                ),
+            }),
+        ),
+        "ping" => ok(id, json!({})),
+        "tools/list" => ok(id, json!({ "tools": session.tools() })),
+        "tools/call" => {
+            let name = params
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let untrusted = session.is_untrusted(&name);
+
+            match session.call(&name, &args).await {
+                Ok(raw) => ok(id, tool::to_mcp_result(&raw, untrusted)),
+                // A failing tool is a normal result with isError, not a
+                // protocol error — the model should see it and adapt.
+                Err(e) => ok(id, tool::to_mcp_error(&e.to_string())),
+            }
+        }
+        _ if is_notification => return None,
+        _ => err(id, -32601, &format!("method not found: {method}")),
+    };
+
+    if is_notification {
+        return None;
+    }
+    Some(response)
+}
+
+/// True when a message is a tool call, and so may have changed page state worth
+/// writing back to a session.
+pub fn mutates(req: &Value) -> bool {
+    req.get("method").and_then(|m| m.as_str()) == Some("tools/call")
+}
+
 /// Serve MCP on stdin/stdout until the client closes the pipe.
 // Borrowed rather than consumed, so the caller still holds the page once the
 // client disconnects — that is when a session gets written back, and tool
@@ -334,54 +397,7 @@ pub async fn serve(session: &mut Session, target: &str) -> Result<()> {
             }
         };
 
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(json!({}));
-
-        // Notifications carry no id and must not be answered.
-        let is_notification = req.get("id").is_none();
-
-        let response = match method {
-            "initialize" => ok(
-                id,
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": {
-                        "name": "webmcp-conduit",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                    "instructions": format!(
-                        "Tools exposed by {target}, discovered via WebMCP and served over \
-                         MCP by conduit (engine: {}). Tool names are prefixed with `{}` to \
-                         identify their origin site.",
-                        session.engine.as_str(), session.prefix
-                    ),
-                }),
-            ),
-            "ping" => ok(id, json!({})),
-            "tools/list" => ok(id, json!({ "tools": session.tools() })),
-            "tools/call" => {
-                let name = params
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let untrusted = session.is_untrusted(&name);
-
-                match session.call(&name, &args).await {
-                    Ok(raw) => ok(id, tool::to_mcp_result(&raw, untrusted)),
-                    // A failing tool is a normal result with isError, not a
-                    // protocol error — the model should see it and adapt.
-                    Err(e) => ok(id, tool::to_mcp_error(&e.to_string())),
-                }
-            }
-            _ if is_notification => continue,
-            _ => err(id, -32601, &format!("method not found: {method}")),
-        };
-
-        if !is_notification {
+        if let Some(response) = handle(session, target, &req).await {
             respond(&response)?;
         }
     }

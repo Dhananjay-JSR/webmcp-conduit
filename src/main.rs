@@ -6,13 +6,14 @@
 mod cookies;
 mod declarative;
 mod fetch;
+mod http;
 mod isolate;
 mod mcp;
 mod modules;
 mod session;
 mod tool;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -60,6 +61,28 @@ enum Command {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
+    /// Serve MCP over HTTP, for many pages and many callers at once.
+    ///
+    /// Each request names its own target: the server is not bound to one site
+    /// the way `serve` is.
+    ///
+    ///   POST /mcp/v1/connect?url=<site>&session=<id>
+    Http {
+        /// Address to bind.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        /// Skip JavaScript entirely — declarative `<form>` tools only.
+        #[arg(long)]
+        no_scripts: bool,
+        /// Only serve these hosts, and their subdomains. Strongly recommended
+        /// for anything reachable from outside your machine.
+        #[arg(long = "allow-host", value_name = "HOST")]
+        allow_hosts: Vec<String>,
+        /// Permit loopback and private addresses as targets. Off by default,
+        /// because an open endpoint that fetches any URL is an SSRF proxy.
+        #[arg(long)]
+        allow_private: bool,
+    },
     /// Inspect and manage saved sessions.
     Session {
         #[command(subcommand)]
@@ -89,7 +112,7 @@ enum SessionCommand {
 ///
 /// The main thread's stack is fixed at whatever the OS gave it, so the work
 /// runs on a thread we size ourselves.
-const ENGINE_STACK: usize = 256 * 1024 * 1024;
+pub const ENGINE_STACK: usize = 256 * 1024 * 1024;
 
 fn main() -> Result<()> {
     std::thread::Builder::new()
@@ -165,6 +188,34 @@ async fn run() -> Result<()> {
             // the entire reason to keep a session. Saving only on the way out
             // means a client that disconnects cleanly keeps its work.
             commit_session(handle.as_mut(), &mut loaded)?;
+        }
+        Command::Http {
+            bind,
+            no_scripts,
+            allow_hosts,
+            allow_private,
+        } => {
+            let addr: std::net::SocketAddr = bind
+                .parse()
+                .with_context(|| format!("`{bind}` is not an address:port"))?;
+
+            if allow_hosts.is_empty() && !addr.ip().is_loopback() {
+                eprintln!(
+                    "conduit: warning — bound to {addr} with no --allow-host. \
+                     Anyone who can reach this port can make conduit fetch any \
+                     public URL on their behalf."
+                );
+            }
+
+            http::serve(
+                addr,
+                http::Config {
+                    allow_private,
+                    allow_hosts,
+                    no_scripts,
+                },
+            )
+            .await?;
         }
         Command::Session { command } => run_session_command(command)?,
     }
