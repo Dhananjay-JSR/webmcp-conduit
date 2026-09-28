@@ -57,10 +57,15 @@ fn main() {
                 let detail = ctx
                     .catch()
                     .as_exception()
-                    .and_then(|ex| ex.message().map(|m| match ex.line() {
-                        Some(l) => format!("{m} (line {l})"),
-                        None => m,
-                    }))
+                    .and_then(|ex| {
+                        ex.message().map(|m| match ex.stack() {
+                            Some(st) => match st.lines().map(str::trim).find(|l| !l.is_empty()) {
+                                Some(frame) => format!("{m}  |  {frame}"),
+                                None => m,
+                            },
+                            None => m,
+                        })
+                    })
                     .unwrap_or_else(|| e.to_string());
                 println!("EVAL FAILED: {detail}");
                 return;

@@ -203,15 +203,10 @@
   }
 
   // ------------------------------------------------- engine capability gaps
-  // Not web APIs — these are places where QuickJS predates the JS spec the
-  // vendored platform layer was written against. webidl-conversions reads
-  // these property descriptors at load time and dies on a missing one, so
-  // they have to exist before platform.js evaluates.
-  //
-  // Each descriptor is checked on its own. QuickJS *does* have
-  // SharedArrayBuffer, just not the resizable-buffer additions to it, so
-  // gating on whether the constructor exists skips the very properties that
-  // are missing.
+  // QuickJS-NG supplies WeakRef, FinalizationRegistry and the resizable
+  // ArrayBuffer descriptors natively, so nothing is needed here any more.
+  // The guards stay because the checks are free and a future engine change
+  // should degrade rather than break.
   function ensureGetter(obj, name, get) {
     if (!obj) return;
     try {
@@ -220,31 +215,12 @@
       }
     } catch (e) { /* frozen prototype; nothing to do */ }
   }
-
-  // QuickJS has no weak references. A strong-reference stand-in is
-  // functionally correct — it only forgoes the collection behaviour, and a
-  // harvest is short-lived enough that nothing depends on that.
-  if (typeof globalThis.WeakRef === "undefined") {
-    globalThis.WeakRef = function WeakRef(target) { this._target = target; };
-    globalThis.WeakRef.prototype.deref = function () { return this._target; };
-  }
-  if (typeof globalThis.FinalizationRegistry === "undefined") {
-    globalThis.FinalizationRegistry = function FinalizationRegistry() {};
-    globalThis.FinalizationRegistry.prototype.register = function () {};
-    globalThis.FinalizationRegistry.prototype.unregister = function () { return false; };
-  }
-
-  if (typeof globalThis.SharedArrayBuffer === "undefined") {
-    globalThis.SharedArrayBuffer = function SharedArrayBuffer() {
-      throw new Error("SharedArrayBuffer is not available in conduit");
-    };
-  }
-  ensureGetter(globalThis.SharedArrayBuffer.prototype, "byteLength", function () { return 0; });
-  ensureGetter(globalThis.SharedArrayBuffer.prototype, "growable", function () { return false; });
-  ensureGetter(globalThis.SharedArrayBuffer.prototype, "maxByteLength", function () { return 0; });
   ensureGetter(ArrayBuffer.prototype, "resizable", function () { return false; });
   ensureGetter(ArrayBuffer.prototype, "maxByteLength", function () { return this.byteLength; });
-  ensureGetter(ArrayBuffer.prototype, "detached", function () { return false; });
+  if (typeof globalThis.SharedArrayBuffer !== "undefined") {
+    ensureGetter(globalThis.SharedArrayBuffer.prototype, "growable", function () { return false; });
+    ensureGetter(globalThis.SharedArrayBuffer.prototype, "maxByteLength", function () { return 0; });
+  }
 
   // -------------------------------------------------------- Node-ish stubs
   // Referenced by happy-dom but never reached on a harvest path.

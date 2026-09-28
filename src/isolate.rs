@@ -283,17 +283,17 @@ unsafe extern "C" fn on_promise_rejection(
     ctx: *mut rquickjs::qjs::JSContext,
     _promise: rquickjs::qjs::JSValue,
     reason: rquickjs::qjs::JSValue,
-    is_handled: std::os::raw::c_int,
+    is_handled: bool,
     _opaque: *mut std::os::raw::c_void,
 ) {
     // QuickJS reports a rejection twice: once when it happens, and again if a
     // handler is attached later. Only the unhandled report is interesting.
-    if is_handled != 0 {
+    if is_handled {
         return;
     }
     unsafe fn to_string(ctx: *mut rquickjs::qjs::JSContext, v: rquickjs::qjs::JSValue) -> Option<String> {
         let mut len: rquickjs::qjs::size_t = 0;
-        let raw = rquickjs::qjs::JS_ToCStringLen2(ctx, &mut len, v, 0);
+        let raw = rquickjs::qjs::JS_ToCStringLen2(ctx, &mut len, v, false);
         if raw.is_null() {
             return None;
         }
@@ -334,8 +334,13 @@ struct RecordingLoader {
 }
 
 impl Loader for RecordingLoader {
-    fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<JsModule<'js, Declared>> {
-        if let Ok(m) = self.inner.load(ctx, name) {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        attrs: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<JsModule<'js, Declared>> {
+        if let Ok(m) = self.inner.load(ctx, name, attrs.clone()) {
             return Ok(m);
         }
 
@@ -425,7 +430,13 @@ struct UrlResolver {
 }
 
 impl Resolver for UrlResolver {
-    fn resolve(&mut self, _ctx: &Ctx<'_>, base: &str, name: &str) -> rquickjs::Result<String> {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attrs: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
         if let Ok(absolute) = url::Url::parse(name) {
             return Ok(absolute.to_string());
         }
@@ -450,10 +461,15 @@ fn describe_exception(ctx: &Ctx<'_>, fallback: &str) -> String {
             .message()
             .or_else(|| ex.to_string().into())
             .unwrap_or_else(|| fallback.to_string());
-        return match ex.line() {
-            Some(line) => format!("{msg} (line {line})"),
-            None => msg,
-        };
+        // The first stack frame names the file and position, which beats a
+        // bare line number with no file attached.
+        if let Some(frame) = ex
+            .stack()
+            .and_then(|st| st.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from))
+        {
+            return format!("{msg}  |  {frame}");
+        }
+        return msg;
     }
     // Not an Error object: coerce through JS rather than through Rust.
     if let Ok(global) = ctx.globals().get::<_, rquickjs::Object>("JSON") {

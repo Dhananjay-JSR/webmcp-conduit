@@ -83,6 +83,26 @@ site finds a new gap, and none of that work is about WebMCP. What stays ours is
 the glue QuickJS does not provide — timers on a virtual clock, the web globals
 happy-dom loads against, and the WebMCP shim itself.
 
+## It runs real applications
+
+OpenAI's [Margin](https://learn.chatgpt.com/docs/webmcp) demo — the worked
+example in ChatGPT's own Site tools documentation — is a local-first document
+editor built on React Server Components, with an IndexedDB store and rich-text
+editing. `conduit` exposes all ten of its tools and drives them:
+
+```console
+$ conduit probe https://margin-local-docs.openai.chatgpt.site/
+  engine: isolate   scripts: 7/7 ran   tools: 10
+
+  margin_..._list_documents [read-only]
+  margin_..._create_document
+  margin_..._add_comment
+  ...
+```
+
+Creating a document through MCP and listing it back works end to end, with the
+new document persisted in the page's IndexedDB between calls. No browser.
+
 ## What it is not
 
 It is not a browser. There is no layout, no rendering, no canvas. A page that
@@ -107,9 +127,8 @@ issue with the output.
 Early. The engine works end to end — page scripts execute, tools register,
 `tools/call` mutates real page state that persists across calls. What's missing:
 
-- **Angular and other framework runtimes** are untested; React works.
-- **React Server Components** do not hydrate, so a page whose tools register
-  inside an RSC client component comes up empty.
+- **Angular and other framework runtimes** are untested. React, including
+  React Server Components, works.
 - **No layout.** `getBoundingClientRect` returns zeros. A page that gates tool
   registration behind real geometry will come up empty.
 - **Authenticated sessions.** No cookie jar yet, so logged-in sites see you
