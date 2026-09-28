@@ -63,27 +63,29 @@ enum Command {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
-    /// Serve MCP over HTTP, for many pages and many callers at once.
+    /// Serve declared sites over MCP on HTTP.
     ///
-    /// Each request names its own target: the server is not bound to one site
-    /// the way `serve` is.
+    /// Unlike `serve`, this does not take a target: the sites are declared up
+    /// front and each becomes a route. A caller chooses which site to talk to,
+    /// never which URL to fetch, and never which session to speak for.
     ///
-    ///   POST /mcp/v1/connect?url=<site>&session=<id>
+    ///   conduit http --site notes=https://notes.example
+    ///   POST /mcp/v1/notes
     Http {
+        /// A site to serve, as `name=url`. Repeatable. The name is the route
+        /// and the session, so mounting one site twice under two names gives it
+        /// two independent browser profiles.
+        #[arg(long = "site", value_name = "NAME=URL", required = true)]
+        sites: Vec<String>,
         /// Address to bind.
         #[arg(long, default_value = "127.0.0.1:8080")]
         bind: String,
         /// Skip JavaScript entirely — declarative `<form>` tools only.
         #[arg(long)]
         no_scripts: bool,
-        /// Only serve these hosts, and their subdomains. Strongly recommended
-        /// for anything reachable from outside your machine.
-        #[arg(long = "allow-host", value_name = "HOST")]
-        allow_hosts: Vec<String>,
-        /// Permit loopback and private addresses as targets. Off by default,
-        /// because an open endpoint that fetches any URL is an SSRF proxy.
+        /// Keep nothing between requests: no cookies, no storage.
         #[arg(long)]
-        allow_private: bool,
+        stateless: bool,
         /// Browser origins permitted to call this server, e.g.
         /// `https://app.example.com`. Empty means none, which is right when the
         /// clients are MCP hosts rather than web pages. The MCP spec requires
@@ -206,31 +208,38 @@ async fn run() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("serving MCP: {e}"))?;
         }
         Command::Http {
+            sites,
             bind,
             no_scripts,
-            allow_hosts,
-            allow_private,
+            stateless,
             allow_origins,
         } => {
             let addr: std::net::SocketAddr = bind
                 .parse()
                 .with_context(|| format!("`{bind}` is not an address:port"))?;
 
-            if allow_hosts.is_empty() && !addr.ip().is_loopback() {
-                eprintln!(
-                    "conduit: warning — bound to {addr} with no --allow-host. \
-                     Anyone who can reach this port can make conduit fetch any \
-                     public URL on their behalf."
-                );
+            let sites = sites
+                .iter()
+                .map(|spec| http::parse_site(spec))
+                .collect::<Result<Vec<_>>>()?;
+
+            // Two mounts pointing at one name would make the second
+            // unreachable, which is the kind of thing to say at startup rather
+            // than leave someone to discover.
+            let mut seen = std::collections::HashSet::new();
+            for site in &sites {
+                if !seen.insert(&site.name) {
+                    anyhow::bail!("`{}` is declared more than once", site.name);
+                }
             }
 
             http::serve(
                 addr,
                 http::Config {
-                    allow_private,
-                    allow_hosts,
+                    sites,
                     allow_origins,
                     no_scripts,
+                    stateless,
                 },
             )
             .await?;
