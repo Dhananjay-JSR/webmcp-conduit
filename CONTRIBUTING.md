@@ -111,3 +111,24 @@ Run `conduit probe <url> --json` and include the output. It carries the script
 errors, unresolved modules, unhandled rejections and missing APIs, which is
 almost always enough to say what happened without anyone having to reproduce
 it first.
+
+## Releasing
+
+Versions are driven by the tag, and the release workflow refuses to build if
+the tag and `Cargo.toml` disagree — otherwise the binaries report a different
+version than the tag promises.
+
+```bash
+# bump the version in Cargo.toml, then
+cargo test
+git commit -am "Release v0.2.0"
+git tag v0.2.0
+git push && git push --tags
+```
+
+That builds binaries for Linux, macOS and Windows on x86_64 and aarch64,
+verifies each one actually runs, publishes them to a GitHub release with
+checksums, and leaves `install.sh` able to find them.
+
+`cargo publish` to crates.io is deliberately separate and manual, because it
+cannot be undone.

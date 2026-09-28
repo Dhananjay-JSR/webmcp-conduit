@@ -92,7 +92,7 @@ pub fn origin_allowed(url: &Url, page_origin: &str) -> bool {
         return true;
     }
     url.host_str()
-        .map(|h| SCRIPT_CDNS.iter().any(|cdn| h == *cdn))
+        .map(|h| SCRIPT_CDNS.contains(&h))
         .unwrap_or(false)
 }
 
@@ -139,7 +139,9 @@ mod tests {
     #[test]
     fn detects_explicit_opt_out() {
         assert!(parse_tools_disabled(&headers(&["tools=()"])));
-        assert!(parse_tools_disabled(&headers(&["geolocation=(), tools=()"])));
+        assert!(parse_tools_disabled(&headers(&[
+            "geolocation=(), tools=()"
+        ])));
         assert!(parse_tools_disabled(&headers(&["tools=(), camera=*"])));
     }
 

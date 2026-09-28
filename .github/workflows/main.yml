@@ -1,0 +1,38 @@
+name: main
+
+# Everything a PR checks, across every platform we ship a binary for. This
+# is the gate that says a tag would be safe to cut.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Smoke test the CLI
+        shell: bash
+        run: |
+          out=$(cargo run --quiet -- probe fixtures/todo.html)
+          echo "$out"
+          echo "$out" | grep -q "tools: 4" || { echo "expected 4 tools"; exit 1; }

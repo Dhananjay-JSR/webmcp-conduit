@@ -78,7 +78,9 @@ fn synthesize_schema(form: ElementRef) -> (Value, Vec<(String, String)>) {
 
     for ctl in form.select(&control_sel) {
         let el = ctl.value();
-        let Some(field) = el.attr("name") else { continue };
+        let Some(field) = el.attr("name") else {
+            continue;
+        };
         if field.is_empty() {
             continue;
         }
@@ -86,7 +88,10 @@ fn synthesize_schema(form: ElementRef) -> (Value, Vec<(String, String)>) {
         let input_type = el.attr("type").unwrap_or("text").to_lowercase();
 
         if tag == "input" && input_type == "hidden" {
-            fixed.push((field.to_string(), el.attr("value").unwrap_or("").to_string()));
+            fixed.push((
+                field.to_string(),
+                el.attr("value").unwrap_or("").to_string(),
+            ));
             continue;
         }
         if tag == "input" && (input_type == "submit" || input_type == "button") {
@@ -165,7 +170,11 @@ fn input_schema(input_type: &str, el: &scraper::node::Element) -> Value {
             // An integer step implies an integer field, which is a more useful
             // schema for a model than a bare number.
             if let Some(step) = el.attr("step") {
-                if step.parse::<f64>().map(|s| s.fract() == 0.0).unwrap_or(false) {
+                if step
+                    .parse::<f64>()
+                    .map(|s| s.fract() == 0.0)
+                    .unwrap_or(false)
+                {
                     v = json!({"type": "integer"});
                 }
             }
@@ -177,7 +186,8 @@ fn input_schema(input_type: &str, el: &scraper::node::Element) -> Value {
         "date" => json!({"type": "string", "format": "date"}),
         "time" => json!({"type": "string", "format": "time"}),
         "datetime-local" => json!({"type": "string", "format": "date-time"}),
-        "tel" | "password" | "search" | "text" | _ => json!({"type": "string"}),
+        // text, tel, password, search and anything unrecognised.
+        _ => json!({"type": "string"}),
     }
 }
 

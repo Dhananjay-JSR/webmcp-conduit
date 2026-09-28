@@ -1,0 +1,56 @@
+name: PR
+
+# Fast feedback on a pull request: one platform, every check. The full
+# matrix runs on main, where a slower job is not blocking anyone.
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # The engine embeds a C JavaScript interpreter, so an uncached build
+      # is slow enough to matter on every push to a branch.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      # Exercises the whole pipeline — parse, isolate, shim, harvest — which
+      # the unit tests do not cover end to end.
+      - name: Smoke test the CLI
+        run: |
+          out=$(cargo run --quiet -- probe fixtures/todo.html)
+          echo "$out"
+          echo "$out" | grep -q "tools: 4" || { echo "expected 4 tools"; exit 1; }
+
+  # A release builds from whatever Cargo.toml says, so a version that does
+  # not parse or a manifest that will not package should fail here rather
+  # than halfway through tagging.
+  packaging:
+    name: crates.io packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify the crate packages cleanly
+        run: cargo publish --dry-run

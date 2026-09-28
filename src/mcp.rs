@@ -80,9 +80,7 @@ impl Session {
             for (idx, url) in external {
                 match fetch::script(&client, &url, &origin).await {
                     Ok(src) => scripts[idx].source = src,
-                    Err(e) => diagnostics
-                        .script_errors
-                        .push(format!("{url}: {e}")),
+                    Err(e) => diagnostics.script_errors.push(format!("{url}: {e}")),
                 }
             }
             // Imports must all be in hand before evaluation: QuickJS resolves

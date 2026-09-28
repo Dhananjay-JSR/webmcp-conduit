@@ -1,5 +1,9 @@
 # conduit
 
+[![CI](https://github.com/Dhananjay-JSR/webmcp-conduit/actions/workflows/main.yml/badge.svg)](https://github.com/Dhananjay-JSR/webmcp-conduit/actions/workflows/main.yml)
+[![crates.io](https://img.shields.io/crates/v/webmcp-conduit.svg)](https://crates.io/crates/webmcp-conduit)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Turn any WebMCP-enabled website into a standard MCP server. No browser required.**
 
 A website can expose its own functionality to an AI agent as tools, using the
@@ -17,6 +21,12 @@ The client on the other end has never heard of WebMCP. No widget on the page,
 no token to paste, no separate client to install.
 
 ## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dhananjay-JSR/webmcp-conduit/main/install.sh | sh
+```
+
+Or from source:
 
 ```bash
 cargo install webmcp-conduit

@@ -234,7 +234,10 @@ fn print_report(session: &mcp::Session, target: &str) {
 
     if !d.unhandled_rejections.is_empty() {
         println!();
-        println!("  Unhandled promise rejections ({}):", d.unhandled_rejections.len());
+        println!(
+            "  Unhandled promise rejections ({}):",
+            d.unhandled_rejections.len()
+        );
         for r in d.unhandled_rejections.iter().take(8) {
             println!("    - {}", r.lines().next().unwrap_or("").trim());
         }

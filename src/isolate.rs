@@ -20,13 +20,13 @@ use anyhow::{anyhow, Context as _, Result};
 use rquickjs::loader::{BuiltinLoader, Loader, Resolver};
 use rquickjs::module::Declared;
 use rquickjs::Module as JsModule;
-use std::cell::RefCell;
-use std::rc::Rc;
 use rquickjs::{Context, Ctx, Function, Module, Runtime};
-use std::collections::HashMap;
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Host-owned decisions: virtual-clock timers, console bridging, diagnostics.
 const HOST_PRE_JS: &str = include_str!("js/host-pre.js");
@@ -181,7 +181,6 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
     (scripts, external)
 }
 
-
 /// Perform one HTTP request on behalf of the page.
 ///
 /// The same origin policy that governs script loading governs this: a page's
@@ -207,8 +206,8 @@ fn http_request(
         ));
     }
 
-    let mut req = ureq::request(method, parsed.as_str())
-        .timeout(std::time::Duration::from_secs(15));
+    let mut req =
+        ureq::request(method, parsed.as_str()).timeout(std::time::Duration::from_secs(15));
 
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(headers_json) {
         for (k, v) in map {
@@ -291,7 +290,10 @@ unsafe extern "C" fn on_promise_rejection(
     if is_handled {
         return;
     }
-    unsafe fn to_string(ctx: *mut rquickjs::qjs::JSContext, v: rquickjs::qjs::JSValue) -> Option<String> {
+    unsafe fn to_string(
+        ctx: *mut rquickjs::qjs::JSContext,
+        v: rquickjs::qjs::JSValue,
+    ) -> Option<String> {
         let mut len: rquickjs::qjs::size_t = 0;
         let raw = rquickjs::qjs::JS_ToCStringLen2(ctx, &mut len, v, false);
         if raw.is_null() {
@@ -450,7 +452,6 @@ impl Resolver for UrlResolver {
     }
 }
 
-
 /// Describe whatever a page threw. JS permits throwing any value, and when it
 /// is not an `Error` rquickjs surfaces its own conversion failure instead of
 /// the page's problem — which is useless for diagnosis.
@@ -463,10 +464,12 @@ fn describe_exception(ctx: &Ctx<'_>, fallback: &str) -> String {
             .unwrap_or_else(|| fallback.to_string());
         // The first stack frame names the file and position, which beats a
         // bare line number with no file attached.
-        if let Some(frame) = ex
-            .stack()
-            .and_then(|st| st.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from))
-        {
+        if let Some(frame) = ex.stack().and_then(|st| {
+            st.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(String::from)
+        }) {
             return format!("{msg}  |  {frame}");
         }
         return msg;
@@ -515,7 +518,9 @@ impl Page {
         }
         let misses: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         rt.set_loader(
-            UrlResolver { page: doc_base.to_string() },
+            UrlResolver {
+                page: doc_base.to_string(),
+            },
             RecordingLoader {
                 inner: loader,
                 misses: Rc::clone(&misses),
@@ -838,8 +843,7 @@ impl Page {
                     unique.push(m);
                 }
             }
-            self.diagnostics.unresolved_modules =
-                unique.into_iter().cloned().collect();
+            self.diagnostics.unresolved_modules = unique.into_iter().cloned().collect();
         }
     }
 
@@ -904,14 +908,7 @@ impl Page {
         self.settle();
 
         let outcome: Value = self.ctx.with(|ctx| {
-            let raw: String = ctx
-                .globals()
-                .get::<_, Function>("JSON")
-                .ok()
-                .and_then(|_| None::<String>)
-                .unwrap_or_default();
-            let _ = raw;
-            // Stringify on the JS side so we get a plain String across.
+            // Stringify on the JS side so a plain String crosses the boundary.
             ctx.eval::<String, _>("JSON.stringify(globalThis.__conduit_result)")
                 .map_err(|e| anyhow!("reading result: {e}"))
                 .and_then(|s| serde_json::from_str(&s).map_err(|e| anyhow!("{e}")))
@@ -949,7 +946,10 @@ mod tests {
     fn load_fixture() -> Page {
         let url = url::Url::parse("https://todo.example/app").unwrap();
         let (scripts, external) = collect_script_refs(TODO, &url);
-        assert!(external.is_empty(), "fixture should have no external scripts");
+        assert!(
+            external.is_empty(),
+            "fixture should have no external scripts"
+        );
         Page::load(TODO, &url, &url, scripts, HashMap::new()).expect("page should load")
     }
 
@@ -957,7 +957,10 @@ mod tests {
         let url = url::Url::parse("https://todo.example/app").unwrap();
         let (scripts, external) = collect_script_refs(MODULE_TODO, &url);
         assert!(external.is_empty());
-        assert!(scripts.iter().any(|s| s.is_module), "fixture must use a module");
+        assert!(
+            scripts.iter().any(|s| s.is_module),
+            "fixture must use a module"
+        );
         Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new()).expect("page should load")
     }
 
@@ -973,14 +976,21 @@ mod tests {
             page.diagnostics.script_errors
         );
         let tools = page.harvest().unwrap();
-        assert_eq!(tools.len(), 1, "got {:?}", tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(
+            tools.len(),
+            1,
+            "got {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
         assert_eq!(tools[0].name, "module-add");
     }
 
     #[test]
     fn module_side_effects_reach_the_dom() {
         let page = load_module_fixture();
-        let text = page.eval_debug("document.getElementById('root').textContent").unwrap();
+        let text = page
+            .eval_debug("document.getElementById('root').textContent")
+            .unwrap();
         assert_eq!(text, "booted");
     }
 
@@ -991,9 +1001,7 @@ mod tests {
         // from the actual cause.
         let page = load_fixture();
         for prop in ["pathname", "origin", "protocol", "host", "search", "hash"] {
-            let v = page
-                .eval_debug(&format!("typeof location.{prop}"))
-                .unwrap();
+            let v = page.eval_debug(&format!("typeof location.{prop}")).unwrap();
             assert_eq!(v, "string", "location.{prop} should be a string, got {v}");
         }
     }
@@ -1009,7 +1017,8 @@ mod tests {
             "true"
         );
         assert_eq!(
-            page.eval_debug("typeof document.defaultView.history.pushState").unwrap(),
+            page.eval_debug("typeof document.defaultView.history.pushState")
+                .unwrap(),
             "function"
         );
     }
@@ -1030,7 +1039,10 @@ mod tests {
         assert!(names.contains(&"list-todos"));
         assert!(names.contains(&"clear-all"));
         // `debugging` tools are filtered out before the model ever sees them.
-        assert!(!names.contains(&"debug-dump"), "debug tool leaked: {names:?}");
+        assert!(
+            !names.contains(&"debug-dump"),
+            "debug tool leaked: {names:?}"
+        );
     }
 
     #[test]
@@ -1062,7 +1074,8 @@ mod tests {
     #[test]
     fn tool_execution_mutates_real_page_state() {
         let mut page = load_fixture();
-        page.call("add-todo", &json!({"text": "walk the dog"})).unwrap();
+        page.call("add-todo", &json!({"text": "walk the dog"}))
+            .unwrap();
 
         // The second tool reads the DOM the first tool wrote to. If state did
         // not persist across calls, this would still only see "buy milk".
@@ -1103,20 +1116,48 @@ mod tests {
         let page = load_fixture();
         let required = [
             // DOM
-            "Element", "HTMLElement", "Node", "Document", "DocumentFragment",
-            "Text", "Comment", "DOMParser", "MutationObserver", "customElements",
+            "Element",
+            "HTMLElement",
+            "Node",
+            "Document",
+            "DocumentFragment",
+            "Text",
+            "Comment",
+            "DOMParser",
+            "MutationObserver",
+            "customElements",
             "ShadowRoot",
             // Events
-            "Event", "CustomEvent", "EventTarget", "AbortController",
-            "AbortSignal", "KeyboardEvent", "MouseEvent",
+            "Event",
+            "CustomEvent",
+            "EventTarget",
+            "AbortController",
+            "AbortSignal",
+            "KeyboardEvent",
+            "MouseEvent",
             // Platform
-            "URL", "URLSearchParams", "TextEncoder", "TextDecoder",
-            "ReadableStream", "structuredClone", "Blob", "FormData",
+            "URL",
+            "URLSearchParams",
+            "TextEncoder",
+            "TextDecoder",
+            "ReadableStream",
+            "structuredClone",
+            "Blob",
+            "FormData",
             // Network
-            "fetch", "Headers", "Request", "Response", "XMLHttpRequest",
+            "fetch",
+            "Headers",
+            "Request",
+            "Response",
+            "XMLHttpRequest",
             // Host-owned
-            "setTimeout", "queueMicrotask", "requestAnimationFrame",
-            "performance", "localStorage", "history", "matchMedia",
+            "setTimeout",
+            "queueMicrotask",
+            "requestAnimationFrame",
+            "performance",
+            "localStorage",
+            "history",
+            "matchMedia",
             "getComputedStyle",
         ];
 
@@ -1129,7 +1170,10 @@ mod tests {
                 missing.push(name);
             }
         }
-        assert!(missing.is_empty(), "platform surface regressed: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "platform surface regressed: {missing:?}"
+        );
     }
 
     #[test]
@@ -1139,11 +1183,13 @@ mod tests {
         // actually depend on.
         let page = load_fixture();
         assert_eq!(
-            page.eval_debug("new URL('./y', 'https://a.example/x/z').href").unwrap(),
+            page.eval_debug("new URL('./y', 'https://a.example/x/z').href")
+                .unwrap(),
             "https://a.example/x/y"
         );
         assert_eq!(
-            page.eval_debug("new URL('https://a.example/p?q=1').searchParams.get('q')").unwrap(),
+            page.eval_debug("new URL('https://a.example/p?q=1').searchParams.get('q')")
+                .unwrap(),
             "1"
         );
     }
@@ -1156,12 +1202,20 @@ mod tests {
         // nobody is listening to, which is invisible.
         let page = load_fixture();
         assert_eq!(page.eval_debug("typeof fetch").unwrap(), "function");
-        assert_eq!(page.eval_debug("typeof new Headers().get").unwrap(), "function");
         assert_eq!(
-            page.eval_debug("new Headers({'x-a': '1'}).get('x-a')").unwrap(),
+            page.eval_debug("typeof new Headers().get").unwrap(),
+            "function"
+        );
+        assert_eq!(
+            page.eval_debug("new Headers({'x-a': '1'}).get('x-a')")
+                .unwrap(),
             "1"
         );
-        assert_eq!(page.eval_debug("typeof new Request('https://a.example/').url").unwrap(), "string");
+        assert_eq!(
+            page.eval_debug("typeof new Request('https://a.example/').url")
+                .unwrap(),
+            "string"
+        );
         assert_eq!(page.eval_debug("new Response('hi').status").unwrap(), "200");
     }
 
@@ -1222,7 +1276,10 @@ mod tests {
         let (scripts, _) = collect_script_refs(html, &url);
         let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
         assert_eq!(page.diagnostics.register_calls, 0);
-        assert!(page.diagnostics.consume_calls > 0, "getTools should count as consumption");
+        assert!(
+            page.diagnostics.consume_calls > 0,
+            "getTools should count as consumption"
+        );
     }
 
     #[test]
@@ -1231,10 +1288,19 @@ mod tests {
         // reading a spec list. Entropy, storage and segmentation are the
         // three that stop a local-first app before it registers anything.
         let page = load_fixture();
-        assert_eq!(page.eval_debug("typeof crypto.randomUUID").unwrap(), "function");
+        assert_eq!(
+            page.eval_debug("typeof crypto.randomUUID").unwrap(),
+            "function"
+        );
         assert_eq!(page.eval_debug("typeof indexedDB").unwrap(), "object");
-        assert_eq!(page.eval_debug("typeof Intl.Segmenter").unwrap(), "function");
-        assert_eq!(page.eval_debug("typeof MessageChannel").unwrap(), "function");
+        assert_eq!(
+            page.eval_debug("typeof Intl.Segmenter").unwrap(),
+            "function"
+        );
+        assert_eq!(
+            page.eval_debug("typeof MessageChannel").unwrap(),
+            "function"
+        );
 
         // A v4 UUID, and two calls must differ.
         let a = page.eval_debug("crypto.randomUUID()").unwrap();
@@ -1253,7 +1319,11 @@ mod tests {
         let page = load_fixture();
         assert_eq!(page.eval_debug("window === globalThis").unwrap(), "true");
         assert_eq!(page.eval_debug("self === globalThis").unwrap(), "true");
-        assert_eq!(page.eval_debug("document.defaultView === globalThis").unwrap(), "true");
+        assert_eq!(
+            page.eval_debug("document.defaultView === globalThis")
+                .unwrap(),
+            "true"
+        );
         assert_eq!(
             page.eval_debug("(function(){ self.__probe = 7; return globalThis.__probe; })()")
                 .unwrap(),
@@ -1332,12 +1402,18 @@ mod tests {
         );
 
         let tools = page.harvest().unwrap();
-        assert_eq!(tools.len(), 1, "got {:?}", tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(
+            tools.len(),
+            1,
+            "got {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
         assert_eq!(tools[0].name, "add-item");
 
         // The effect ran to completion, not just far enough to register.
         assert_eq!(
-            page.eval_debug("document.getElementById('status').textContent").unwrap(),
+            page.eval_debug("document.getElementById('status').textContent")
+                .unwrap(),
             "registered"
         );
     }
@@ -1367,13 +1443,19 @@ mod tests {
             page.diagnostics.script_errors
         );
 
-        let mut names: Vec<String> = page.harvest().unwrap().into_iter().map(|t| t.name).collect();
+        let mut names: Vec<String> = page
+            .harvest()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         names.sort();
         assert_eq!(names, vec!["client-ref-tool", "rsc-tool"], "got {names:?}");
 
         // The client component both mounted and finished its effect.
         assert_eq!(
-            page.eval_debug("document.getElementById('widget').textContent").unwrap(),
+            page.eval_debug("document.getElementById('widget').textContent")
+                .unwrap(),
             "widget registered"
         );
     }

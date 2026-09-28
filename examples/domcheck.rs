@@ -4,7 +4,9 @@
 use rquickjs::{Context, Runtime};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: domcheck <bundle.js>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: domcheck <bundle.js>");
     let src = std::fs::read_to_string(&path).expect("read bundle");
     println!("bundle: {} bytes", src.len());
 
@@ -95,6 +97,8 @@ fn main() {
     });
 
     while rt.is_job_pending() {
-        if rt.execute_pending_job().is_err() { break; }
+        if rt.execute_pending_job().is_err() {
+            break;
+        }
     }
 }

@@ -165,10 +165,22 @@ import{ReadStream as f,WriteStream as p}from"/node/tty.mjs"
 import"/node/buffer.mjs"
 export{a as b}from"/node/util.mjs""#;
         let specs = import_specifiers(src);
-        assert!(specs.contains(&"/node/events.mjs".to_string()), "got {specs:?}");
-        assert!(specs.contains(&"/node/tty.mjs".to_string()), "got {specs:?}");
-        assert!(specs.contains(&"/node/buffer.mjs".to_string()), "got {specs:?}");
-        assert!(specs.contains(&"/node/util.mjs".to_string()), "got {specs:?}");
+        assert!(
+            specs.contains(&"/node/events.mjs".to_string()),
+            "got {specs:?}"
+        );
+        assert!(
+            specs.contains(&"/node/tty.mjs".to_string()),
+            "got {specs:?}"
+        );
+        assert!(
+            specs.contains(&"/node/buffer.mjs".to_string()),
+            "got {specs:?}"
+        );
+        assert!(
+            specs.contains(&"/node/util.mjs".to_string()),
+            "got {specs:?}"
+        );
     }
 
     #[test]

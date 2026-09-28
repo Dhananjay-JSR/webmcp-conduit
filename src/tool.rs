@@ -216,7 +216,10 @@ mod tests {
             form: None,
         };
         let mcp = t.to_mcp("bank_example");
-        assert!(mcp["description"].as_str().unwrap().contains("[consequential]"));
+        assert!(mcp["description"]
+            .as_str()
+            .unwrap()
+            .contains("[consequential]"));
         assert_eq!(mcp["annotations"]["destructiveHint"], json!(true));
     }
 }
