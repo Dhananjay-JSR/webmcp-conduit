@@ -52,9 +52,27 @@ enum Command {
     },
 }
 
+/// The engine needs a deep stack. A framework reconciler recurses once per
+/// node in the component tree, and React catches the resulting overflow,
+/// reports "an error occurred in a React component", and renders nothing — so
+/// the symptom is a blank page rather than a crash.
+///
+/// The main thread's stack is fixed at whatever the OS gave it, so the work
+/// runs on a thread we size ourselves.
+const ENGINE_STACK: usize = 256 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .name("conduit-engine".into())
+        .stack_size(ENGINE_STACK)
+        .spawn(run)?
+        .join()
+        .map_err(|_| anyhow::anyhow!("engine thread panicked"))?
+}
+
 // QuickJS contexts are not `Send`, so everything stays on one thread.
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     // A bare level is scoped to our own targets. Otherwise `CONDUIT_LOG=debug`
     // also turns on html5ever's tree-builder, which drowns the page's console
     // output in tokenizer noise — and the page's console is the entire reason

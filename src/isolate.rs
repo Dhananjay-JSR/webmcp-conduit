@@ -484,8 +484,12 @@ impl Page {
         let rt = Runtime::new().context("creating QuickJS runtime")?;
         // Page scripts are untrusted. Cap memory and stack so a hostile or
         // merely broken page cannot take the process down with it.
-        rt.set_memory_limit(128 * 1024 * 1024);
-        rt.set_max_stack_size(1024 * 1024);
+        rt.set_memory_limit(512 * 1024 * 1024);
+        // Deep enough for a framework reconciler to walk a real component
+        // tree. Too small and React reports "an error occurred in a React
+        // component", renders nothing, and the page looks empty rather than
+        // broken. main.rs sizes the thread's stack to match.
+        rt.set_max_stack_size(192 * 1024 * 1024);
 
         let origin = url.origin().ascii_serialization();
 
