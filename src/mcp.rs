@@ -36,7 +36,29 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn load(target: &str, allow_scripts: bool) -> Result<Self> {
+    /// Snapshot the page's storage back into a session. A target with no
+    /// JavaScript engine has nothing to save, which is not a failure.
+    pub fn snapshot(&mut self) -> Result<Option<String>> {
+        match self.page.as_mut() {
+            Some(page) => page.export_session().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The key a session files this page's storage under. Matches what was
+    /// used to restore it, including the file:// special case.
+    pub fn origin(&self) -> String {
+        if self.base.scheme() == "file" {
+            return self.base.as_str().to_string();
+        }
+        self.base.origin().ascii_serialization()
+    }
+
+    pub async fn load(
+        target: &str,
+        allow_scripts: bool,
+        session: Option<&crate::session::Handle>,
+    ) -> Result<Self> {
         let client = fetch::client()?;
 
         // A local file is a first-class target: it makes the engine testable
@@ -64,6 +86,14 @@ impl Session {
         // `<base href>` redirects every relative URL on the page. The origin
         // policy still keys off where the document actually came from.
         let origin = base.origin().ascii_serialization();
+        // Every file:// URL serialises to the opaque origin "null", so keying
+        // storage on it would pool every local fixture into one bucket. Real
+        // browsers do isolate them; the URL is the closest thing we have.
+        let storage_key = if base.scheme() == "file" {
+            base.as_str().to_string()
+        } else {
+            origin.clone()
+        };
         let doc_base = isolate::document_base(&html, &base);
         let prefix = tool::host_prefix(base.host_str().unwrap_or("local"));
 
@@ -112,7 +142,18 @@ impl Session {
             };
             diagnostics.script_errors.extend(module_errors);
 
-            let loaded = Page::load(&html, &base, &doc_base, scripts, module_graph)?;
+            // A session's storage belongs to the origin that wrote it.
+            // Restoring one origin's data into another would be exactly the
+            // cross-site leak the same-origin policy exists to prevent.
+            let restore = session.and_then(|s| s.storage_for(&storage_key));
+            let loaded = Page::load(
+                &html,
+                &base,
+                &doc_base,
+                scripts,
+                module_graph,
+                restore.as_deref(),
+            )?;
             diagnostics = isolate::Diagnostics {
                 script_errors: {
                     let mut all = diagnostics.script_errors;
@@ -251,7 +292,10 @@ fn err(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// Serve MCP on stdin/stdout until the client closes the pipe.
-pub async fn serve(mut session: Session, target: &str) -> Result<()> {
+// Borrowed rather than consumed, so the caller still holds the page once the
+// client disconnects — that is when a session gets written back, and tool
+// calls are exactly the thing worth persisting.
+pub async fn serve(session: &mut Session, target: &str) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let stdin = tokio::io::stdin();

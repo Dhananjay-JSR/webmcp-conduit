@@ -7,6 +7,7 @@ mod declarative;
 mod fetch;
 mod isolate;
 mod mcp;
+mod session;
 mod modules;
 mod tool;
 
@@ -41,6 +42,10 @@ enum Command {
         /// For diagnosing why a page did not expose what you expected.
         #[arg(long, value_name = "JS")]
         eval: Option<String>,
+        /// Run in a named session, so the page sees the storage it left
+        /// behind last time. Two ids are two unrelated visitors.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
     /// Serve the page's tools over MCP on stdio.
     Serve {
@@ -49,7 +54,31 @@ enum Command {
         /// Skip JavaScript entirely — declarative `<form>` tools only.
         #[arg(long)]
         no_scripts: bool,
+        /// Run in a named session, so the page sees the storage it left
+        /// behind last time. Two ids are two unrelated visitors.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
+    /// Inspect and manage saved sessions.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// List saved sessions.
+    List,
+    /// Show what one session is holding.
+    Show {
+        id: String,
+        /// Print the raw state, including every stored record.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a session and everything in it.
+    Rm { id: String },
 }
 
 /// The engine needs a deep stack. A framework reconciler recurses once per
@@ -95,27 +124,157 @@ async fn run() -> Result<()> {
             json: as_json,
             no_scripts,
             eval,
+            session: session_id,
         } => {
-            let session = mcp::Session::load(&target, !no_scripts).await?;
+            let mut handle = open_session(session_id.as_deref())?;
+            let mut loaded = mcp::Session::load(&target, !no_scripts, handle.as_ref()).await?;
+
             if let Some(expr) = eval {
-                println!("{}", session.eval(&expr)?);
+                println!("{}", loaded.eval(&expr)?);
+                commit_session(handle.as_mut(), &mut loaded)?;
                 return Ok(());
             }
             if as_json {
-                print_json(&session, &target);
+                print_json(&loaded, &target);
             } else {
-                print_report(&session, &target);
+                print_report(&loaded, &target);
             }
+            commit_session(handle.as_mut(), &mut loaded)?;
         }
-        Command::Serve { target, no_scripts } => {
-            let session = mcp::Session::load(&target, !no_scripts).await?;
+        Command::Serve {
+            target,
+            no_scripts,
+            session: session_id,
+        } => {
+            let mut handle = open_session(session_id.as_deref())?;
+            let mut loaded = mcp::Session::load(&target, !no_scripts, handle.as_ref()).await?;
             // stdout is the MCP transport; status goes to stderr.
             eprintln!(
-                "conduit: serving {} tool(s) from {target} (engine: {})",
-                session.tools().len(),
-                session.engine.as_str()
+                "conduit: serving {} tool(s) from {target} (engine: {}){}",
+                loaded.tools().len(),
+                loaded.engine.as_str(),
+                match &handle {
+                    Some(h) => format!(" [session: {}]", h.id()),
+                    None => String::new(),
+                }
             );
-            mcp::serve(session, &target).await?;
+            mcp::serve(&mut loaded, &target).await?;
+
+            // Tools mutate the page: a tool call that writes to IndexedDB is
+            // the entire reason to keep a session. Saving only on the way out
+            // means a client that disconnects cleanly keeps its work.
+            commit_session(handle.as_mut(), &mut loaded)?;
+        }
+        Command::Session { command } => run_session_command(command)?,
+    }
+
+    Ok(())
+}
+
+/// Open a session, or none at all. An unusable session id is worth failing on
+/// rather than silently falling back to a throwaway run — the caller asked for
+/// persistence and would not get it.
+fn open_session(id: Option<&str>) -> Result<Option<session::Handle>> {
+    match id {
+        Some(id) => Ok(Some(session::Handle::open(id)?)),
+        None => Ok(None),
+    }
+}
+
+/// Write the page's storage back. A snapshot failure is reported but does not
+/// fail the command: the work the user asked for has already been done, and
+/// losing it is bad enough without also hiding the reason.
+fn commit_session(handle: Option<&mut session::Handle>, loaded: &mut mcp::Session) -> Result<()> {
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+
+    match loaded.snapshot() {
+        Ok(Some(storage)) => {
+            let origin = loaded.origin();
+            match handle.commit(&origin, &storage) {
+                Ok(path) => tracing::debug!(target: "conduit", "session saved to {}", path.display()),
+                Err(e) => eprintln!("conduit: could not save session {}: {e}", handle.id()),
+            }
+        }
+        Ok(None) => {} // No engine ran; there is nothing to save.
+        Err(e) => eprintln!("conduit: could not snapshot session {}: {e}", handle.id()),
+    }
+    Ok(())
+}
+
+fn run_session_command(command: SessionCommand) -> Result<()> {
+    let store = session::Store::open()?;
+
+    match command {
+        SessionCommand::List => {
+            let ids = store.list()?;
+            if ids.is_empty() {
+                println!("No sessions yet. Create one with `conduit probe <url> --session <id>`.");
+                println!("They will live in {}", store.root().display());
+                return Ok(());
+            }
+            println!("{}", store.root().display());
+            println!();
+            for id in ids {
+                match store.load(&id) {
+                    Ok(state) => println!("  {id}\n      {}", state.summary()),
+                    Err(e) => println!("  {id}\n      unreadable: {e}"),
+                }
+            }
+        }
+        SessionCommand::Show { id, json: as_json } => {
+            let state = store.load(&id)?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&state)?);
+                return Ok(());
+            }
+            if state.is_empty() {
+                println!("Session {id} is empty.");
+                return Ok(());
+            }
+            println!("Session {id}");
+            println!("  stored at  {}", store.dir_for(&id)?.display());
+            println!("  created    {}", state.created);
+            println!("  updated    {}", state.updated);
+            println!("  {}", state.summary());
+            for origin in state.origins() {
+                println!();
+                println!("  {origin}");
+                if let Some(blob) = state.storage.get(origin) {
+                    if let Some(local) = blob.get("localStorage").and_then(|v| v.as_object()) {
+                        for key in local.keys() {
+                            println!("      localStorage  {key}");
+                        }
+                    }
+                    if let Some(dbs) = blob.get("databases").and_then(|v| v.as_array()) {
+                        for db in dbs {
+                            let name = db.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                            for store_spec in
+                                db.get("stores").and_then(|v| v.as_array()).unwrap_or(&vec![])
+                            {
+                                let store_name = store_spec
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?");
+                                let count = store_spec
+                                    .get("records")
+                                    .and_then(|v| v.as_array())
+                                    .map(|r| r.len())
+                                    .unwrap_or(0);
+                                println!("      indexedDB     {name}/{store_name} ({count} record(s))");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SessionCommand::Rm { id } => {
+            if store.remove(&id)? {
+                println!("Deleted session {id}.");
+            } else {
+                println!("No session named {id}.");
+            }
         }
     }
 
