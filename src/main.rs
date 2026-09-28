@@ -5,11 +5,13 @@
 
 mod cookies;
 mod declarative;
+mod engine;
 mod fetch;
 mod http;
 mod isolate;
 mod mcp;
 mod modules;
+mod server;
 mod session;
 mod tool;
 
@@ -82,6 +84,12 @@ enum Command {
         /// because an open endpoint that fetches any URL is an SSRF proxy.
         #[arg(long)]
         allow_private: bool,
+        /// Browser origins permitted to call this server, e.g.
+        /// `https://app.example.com`. Empty means none, which is right when the
+        /// clients are MCP hosts rather than web pages. The MCP spec requires
+        /// this check to prevent DNS rebinding.
+        #[arg(long = "allow-origin", value_name = "ORIGIN")]
+        allow_origins: Vec<String>,
     },
     /// Inspect and manage saved sessions.
     Session {
@@ -170,30 +178,39 @@ async fn run() -> Result<()> {
             no_scripts,
             session: session_id,
         } => {
-            let mut handle = open_session(session_id.as_deref())?;
-            let mut loaded = mcp::Session::load(&target, !no_scripts, handle.as_ref()).await?;
+            let handle = engine::spawn(target.clone(), session_id.clone(), no_scripts).await?;
+            let description = handle.describe().await?;
+
             // stdout is the MCP transport; status goes to stderr.
             eprintln!(
                 "conduit: serving {} tool(s) from {target} (engine: {}){}",
-                loaded.tools().len(),
-                loaded.engine.as_str(),
-                match &handle {
-                    Some(h) => format!(" [session: {}]", h.id()),
+                description.tool_count,
+                description.engine,
+                match &session_id {
+                    Some(id) => format!(" [session: {id}]"),
                     None => String::new(),
                 }
             );
-            mcp::serve(&mut loaded, &target).await?;
 
-            // Tools mutate the page: a tool call that writes to IndexedDB is
-            // the entire reason to keep a session. Saving only on the way out
-            // means a client that disconnects cleanly keeps its work.
-            commit_session(handle.as_mut(), &mut loaded)?;
+            let service = server::Conduit::new(handle, &target).await;
+            let running = rmcp::serve_server(service, rmcp::transport::io::stdio())
+                .await
+                .map_err(|e| anyhow::anyhow!("starting the MCP server: {e}"))?;
+
+            // Returns when the client closes the pipe. Dropping the handle then
+            // closes the engine's channel, and the engine writes its session
+            // back as it shuts down.
+            running
+                .waiting()
+                .await
+                .map_err(|e| anyhow::anyhow!("serving MCP: {e}"))?;
         }
         Command::Http {
             bind,
             no_scripts,
             allow_hosts,
             allow_private,
+            allow_origins,
         } => {
             let addr: std::net::SocketAddr = bind
                 .parse()
@@ -212,6 +229,7 @@ async fn run() -> Result<()> {
                 http::Config {
                     allow_private,
                     allow_hosts,
+                    allow_origins,
                     no_scripts,
                 },
             )
