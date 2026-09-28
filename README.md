@@ -83,6 +83,19 @@ site finds a new gap, and none of that work is about WebMCP. What stays ours is
 the glue QuickJS does not provide — timers on a virtual clock, the web globals
 happy-dom loads against, and the WebMCP shim itself.
 
+## Measured against the official demos
+
+Against [GoogleChromeLabs/webmcp-tools](https://github.com/GoogleChromeLabs/webmcp-tools),
+the reference WebMCP demo suite: **12 of 14 expose their tools, 29 tools in
+total**, with no browser.
+
+Of the two that do not, neither is a failure to find something that was there:
+
+- **page-agent** is an agent that drives *other* sites' tools through
+  `getTools`/`executeTool` and registers none of its own. An empty list is the
+  right answer, and `probe` says which it is.
+- **webmcp-maze** renders through WebGL, which needs a GPU.
+
 ## It runs real applications
 
 OpenAI's [Margin](https://learn.chatgpt.com/docs/webmcp) demo — the worked
@@ -127,6 +140,9 @@ issue with the output.
 Early. The engine works end to end — page scripts execute, tools register,
 `tools/call` mutates real page state that persists across calls. What's missing:
 
+- **WebGL and WebGPU.** There is no GPU, so `canvas.getContext('webgl')`
+  returns null. A page that renders through one never initialises, and never
+  registers. `probe` says so rather than guessing.
 - **Angular and other framework runtimes** are untested. React, including
   React Server Components, works.
 - **No layout.** `getBoundingClientRect` returns zeros. A page that gates tool

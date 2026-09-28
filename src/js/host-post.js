@@ -206,6 +206,30 @@
     }
   } catch (e) {}
 
+  // A page asking for a GPU context is asking for something conduit does not
+  // have, and the failure surfaces far away — a renderer gives up, the app
+  // never initialises, and no tools are registered. Record the reach so
+  // `probe` can say that plainly instead of shrugging.
+  try {
+    // happy-dom extends its classes lazily, so read the hoisted global
+    // rather than the Window instance, which may not carry it yet.
+    var Canvas = globalThis.HTMLCanvasElement || win.HTMLCanvasElement;
+    var CanvasProto = Canvas && Canvas.prototype;
+    if (CanvasProto && CanvasProto.getContext) {
+      var realGetContext = CanvasProto.getContext;
+      CanvasProto.getContext = function (kind) {
+        var k = String(kind || "").toLowerCase();
+        if (k.indexOf("webgl") === 0 || k.indexOf("webgpu") === 0) {
+          globalThis.__conduit_note_missing(
+            "canvas.getContext('" + k + "') — no GPU, so nothing renders"
+          );
+          return null;
+        }
+        return realGetContext.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+
   // ---------------------------------------------------------------- HTML
   globalThis.__conduit_load_html = function (html) {
     try {

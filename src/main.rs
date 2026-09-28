@@ -175,14 +175,18 @@ fn print_report(session: &mcp::Session, target: &str) {
                 "  The page read document.modelContext {} time(s) but never called",
                 d.model_context_lookups
             );
-            println!("  registerTool. So it IS a WebMCP site — it just did not get as");
-            println!("  far as registering. Usually that means registration sits behind");
-            println!("  something that did not happen here: framework hydration, a");
-            println!("  route transition, or user interaction.");
-        } else if d.scripts_failed > 0 {
-            println!("  The page never looked for document.modelContext, and {} script(s)",
-                d.scripts_failed);
-            println!("  failed below. Registration was most likely lost with them.");
+            println!("  registerTool. So it IS a WebMCP site — it just never registered.");
+            println!("  Either registration sits behind something that did not happen");
+            println!("  here (framework hydration, a route change, user interaction), or");
+            println!("  the page is a client that drives other sites' tools rather than");
+            println!("  providing its own, in which case an empty list is correct.");
+        } else if !d.script_errors.is_empty() || !d.unhandled_rejections.is_empty() {
+            // Counting only evaluation failures misses the commonest case of
+            // all: a script that never arrived. Telling someone their site
+            // "probably does not use WebMCP" when its entry point 404'd is
+            // worse than saying nothing.
+            println!("  The page never looked for document.modelContext, and something");
+            println!("  failed below. Registration was most likely lost with it.");
         } else if d.scripts_total == 0 {
             println!("  The page has no scripts, and no declarative <form toolname> tools.");
         } else {
