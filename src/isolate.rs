@@ -1289,6 +1289,40 @@ mod tests {
     }
 
     #[test]
+    fn react_hydration_registers_tools_from_an_effect() {
+        // A real React 19 app, server-rendered and hydrated with
+        // hydrateRoot(document, ...), registering from inside useEffect.
+        //
+        // This is the exact shape that fails on OpenAI's Margin demo, and it
+        // passes here — which is what localises that failure to the RSC
+        // payload path rather than to hydration, effects, or the scheduler.
+        let html = include_str!("../fixtures/react/hydrate-document.html");
+        let bundle = include_str!("../fixtures/react/hydrate-document.js");
+        let url = url::Url::parse("https://app.example/index.html").unwrap();
+
+        let (mut scripts, external) = collect_script_refs(html, &url);
+        assert_eq!(external.len(), 1, "fixture loads one external bundle");
+        scripts[external[0].0].source = bundle.to_string();
+
+        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        assert!(
+            page.diagnostics.script_errors.is_empty(),
+            "unexpected errors: {:?}",
+            page.diagnostics.script_errors
+        );
+
+        let tools = page.harvest().unwrap();
+        assert_eq!(tools.len(), 1, "got {:?}", tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(tools[0].name, "add-item");
+
+        // The effect ran to completion, not just far enough to register.
+        assert_eq!(
+            page.eval_debug("document.getElementById('status').textContent").unwrap(),
+            "registered"
+        );
+    }
+
+    #[test]
     fn unknown_tools_fail_cleanly() {
         let mut page = load_fixture();
         let err = page.call("no-such-tool", &json!({})).unwrap_err();
