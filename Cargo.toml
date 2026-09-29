@@ -1,6 +1,6 @@
 [package]
 name = "webmcp-conduit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Turn any WebMCP-enabled website into a standard MCP server. No browser required."
 license = "Apache-2.0"
@@ -28,10 +28,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ego-tree = "0.6.3"
 regex = "1.13.1"
 ureq = "2"
+# Already in the tree via reqwest, so the server side costs little beyond the
+# server feature itself.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 getrandom = "0.4.3"
+rmcp = { version = "3.5.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
+tower-service = "0.3"
 
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+rmcp = { version = "3.5.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }

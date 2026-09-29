@@ -11,10 +11,7 @@ use crate::tool::{self, Engine, WebTool};
 use anyhow::{anyhow, Context as _, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Write;
 use url::Url;
-
-pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 enum Source {
     /// Executes inside the QuickJS page context.
@@ -30,14 +27,52 @@ pub struct Session {
     untrusted: HashMap<String, bool>,
     client: reqwest::Client,
     base: Url,
+    jar: crate::cookies::SharedJar,
     pub engine: Engine,
     pub diagnostics: isolate::Diagnostics,
     pub prefix: String,
 }
 
 impl Session {
-    pub async fn load(target: &str, allow_scripts: bool) -> Result<Self> {
+    /// Snapshot the page's storage back into a session. A target with no
+    /// JavaScript engine has nothing to save, which is not a failure.
+    pub fn snapshot(&mut self) -> Result<Option<String>> {
+        match self.page.as_mut() {
+            Some(page) => page.export_session().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The key a session files this page's storage under. Matches what was
+    /// used to restore it, including the file:// special case.
+    /// The cookies this run ended up holding, ready to store.
+    pub fn cookies(&self) -> Vec<crate::session::Cookie> {
+        self.jar
+            .lock()
+            .map(|jar| jar.to_stored())
+            .unwrap_or_default()
+    }
+
+    pub fn origin(&self) -> String {
+        if self.base.scheme() == "file" {
+            return self.base.as_str().to_string();
+        }
+        self.base.origin().ascii_serialization()
+    }
+
+    pub async fn load(
+        target: &str,
+        allow_scripts: bool,
+        session: Option<&crate::session::Handle>,
+    ) -> Result<Self> {
         let client = fetch::client()?;
+
+        // The jar is built before the first request, because the document
+        // fetch is exactly where a restored login cookie has to be sent.
+        let jar = crate::cookies::shared();
+        if let Some(handle) = session {
+            *jar.lock().unwrap() = crate::cookies::Jar::from_stored(handle.state().cookies.clone());
+        }
 
         // A local file is a first-class target: it makes the engine testable
         // without a network round trip, and it is how you debug a page.
@@ -51,7 +86,7 @@ impl Session {
         } else {
             let url = Url::parse(target)
                 .with_context(|| format!("`{target}` is not a URL or an existing file"))?;
-            let fetched = fetch::page(&client, &url).await?;
+            let fetched = fetch::page(&client, &url, Some(&jar)).await?;
             if fetched.tools_disabled {
                 return Err(anyhow!(
                     "{url} sends `Permissions-Policy: tools=()`. The site has \
@@ -64,6 +99,14 @@ impl Session {
         // `<base href>` redirects every relative URL on the page. The origin
         // policy still keys off where the document actually came from.
         let origin = base.origin().ascii_serialization();
+        // Every file:// URL serialises to the opaque origin "null", so keying
+        // storage on it would pool every local fixture into one bucket. Real
+        // browsers do isolate them; the URL is the closest thing we have.
+        let storage_key = if base.scheme() == "file" {
+            base.as_str().to_string()
+        } else {
+            origin.clone()
+        };
         let doc_base = isolate::document_base(&html, &base);
         let prefix = tool::host_prefix(base.host_str().unwrap_or("local"));
 
@@ -78,7 +121,7 @@ impl Session {
         if allow_scripts {
             let (mut scripts, external) = isolate::collect_script_refs(&html, &doc_base);
             for (idx, url) in external {
-                match fetch::script(&client, &url, &origin).await {
+                match fetch::script(&client, &url, &origin, Some(&jar)).await {
                     Ok(src) => scripts[idx].source = src,
                     Err(e) => diagnostics.script_errors.push(format!("{url}: {e}")),
                 }
@@ -99,7 +142,7 @@ impl Session {
             // at runtime through IDs we cannot see in any source.
             let mut preloaded: Vec<(String, String)> = Vec::new();
             for u in isolate::collect_modulepreloads(&html, &doc_base) {
-                match fetch::script(&client, &u, &origin).await {
+                match fetch::script(&client, &u, &origin, Some(&jar)).await {
                     Ok(src) => preloaded.push((u.to_string(), src)),
                     Err(e) => diagnostics.script_errors.push(format!("{u}: {e}")),
                 }
@@ -108,11 +151,24 @@ impl Session {
             let (module_graph, module_errors) = if entries.is_empty() && preloaded.is_empty() {
                 (Default::default(), Vec::new())
             } else {
-                crate::modules::prefetch_graph(&client, entries, preloaded, &origin).await
+                crate::modules::prefetch_graph(&client, entries, preloaded, &origin, Some(&jar))
+                    .await
             };
             diagnostics.script_errors.extend(module_errors);
 
-            let loaded = Page::load(&html, &base, &doc_base, scripts, module_graph)?;
+            // A session's storage belongs to the origin that wrote it.
+            // Restoring one origin's data into another would be exactly the
+            // cross-site leak the same-origin policy exists to prevent.
+            let restore = session.and_then(|s| s.storage_for(&storage_key));
+            let loaded = Page::load(
+                &html,
+                &base,
+                &doc_base,
+                scripts,
+                module_graph,
+                restore.as_deref(),
+                Some(jar.clone()),
+            )?;
             diagnostics = isolate::Diagnostics {
                 script_errors: {
                     let mut all = diagnostics.script_errors;
@@ -154,6 +210,7 @@ impl Session {
             untrusted,
             client,
             base,
+            jar,
             engine,
             diagnostics,
             prefix,
@@ -235,101 +292,7 @@ impl Session {
         .to_string())
     }
 
-    fn is_untrusted(&self, name: &str) -> bool {
+    pub fn is_untrusted(&self, name: &str) -> bool {
         self.untrusted.get(name).copied().unwrap_or(false)
     }
-}
-
-// ----------------------------------------------------------------- JSON-RPC
-
-fn ok(id: Value, result: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-fn err(id: Value, code: i64, message: &str) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-}
-
-/// Serve MCP on stdin/stdout until the client closes the pipe.
-pub async fn serve(mut session: Session, target: &str) -> Result<()> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
-
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let req: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => {
-                respond(&err(Value::Null, -32700, &format!("parse error: {e}")))?;
-                continue;
-            }
-        };
-
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(json!({}));
-
-        // Notifications carry no id and must not be answered.
-        let is_notification = req.get("id").is_none();
-
-        let response = match method {
-            "initialize" => ok(
-                id,
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": {
-                        "name": "webmcp-conduit",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                    "instructions": format!(
-                        "Tools exposed by {target}, discovered via WebMCP and served over \
-                         MCP by conduit (engine: {}). Tool names are prefixed with `{}` to \
-                         identify their origin site.",
-                        session.engine.as_str(), session.prefix
-                    ),
-                }),
-            ),
-            "ping" => ok(id, json!({})),
-            "tools/list" => ok(id, json!({ "tools": session.tools() })),
-            "tools/call" => {
-                let name = params
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let untrusted = session.is_untrusted(&name);
-
-                match session.call(&name, &args).await {
-                    Ok(raw) => ok(id, tool::to_mcp_result(&raw, untrusted)),
-                    // A failing tool is a normal result with isError, not a
-                    // protocol error — the model should see it and adapt.
-                    Err(e) => ok(id, tool::to_mcp_error(&e.to_string())),
-                }
-            }
-            _ if is_notification => continue,
-            _ => err(id, -32601, &format!("method not found: {method}")),
-        };
-
-        if !is_notification {
-            respond(&response)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn respond(v: &Value) -> Result<()> {
-    let mut out = std::io::stdout().lock();
-    serde_json::to_writer(&mut out, v)?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-    Ok(())
 }

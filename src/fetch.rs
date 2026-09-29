@@ -1,6 +1,7 @@
 //! HTTP for the page and its scripts, plus the one check that separates a
 //! legitimate bridge from a scraper wearing a spec as a costume.
 
+use crate::cookies::SharedJar;
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 use url::Url;
@@ -48,12 +49,22 @@ fn parse_tools_disabled(headers: &reqwest::header::HeaderMap) -> bool {
         })
 }
 
-pub async fn page(client: &reqwest::Client, url: &Url) -> Result<Fetched> {
-    let resp = client
-        .get(url.clone())
+pub async fn page(client: &reqwest::Client, url: &Url, jar: Option<&SharedJar>) -> Result<Fetched> {
+    let mut request = client.get(url.clone());
+    if let Some(header) = jar.and_then(|j| j.lock().ok()?.header_for(url)) {
+        request = request.header(reqwest::header::COOKIE, header);
+    }
+
+    let resp = request
         .send()
         .await
         .with_context(|| format!("fetching {url}"))?;
+
+    // Recorded against the final URL: a login flow redirects, and the cookie
+    // belongs to whichever host actually set it.
+    if let Some(jar) = jar {
+        record_cookies(jar, resp.url(), resp.headers());
+    }
 
     let status = resp.status();
     if !status.is_success() {
@@ -96,10 +107,25 @@ pub fn origin_allowed(url: &Url, page_origin: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Record every `Set-Cookie` on a response into the session's jar.
+pub fn record_cookies(jar: &SharedJar, url: &Url, headers: &reqwest::header::HeaderMap) {
+    let Ok(mut jar) = jar.lock() else { return };
+    for value in headers.get_all(reqwest::header::SET_COOKIE).iter() {
+        if let Ok(text) = value.to_str() {
+            jar.store(url, text);
+        }
+    }
+}
+
 /// Fetch an external script. Same-origin is always allowed; beyond that only
 /// well-known script CDNs are, so a page cannot pull executable code from an
 /// arbitrary third party we were never asked to trust.
-pub async fn script(client: &reqwest::Client, url: &Url, page_origin: &str) -> Result<String> {
+pub async fn script(
+    client: &reqwest::Client,
+    url: &Url,
+    page_origin: &str,
+    jar: Option<&SharedJar>,
+) -> Result<String> {
     // A local file target is the documented way to debug a page, and its
     // scripts and modules are siblings on disk. Without this, `probe
     // ./page.html` silently loses every relative import.
@@ -116,7 +142,14 @@ pub async fn script(client: &reqwest::Client, url: &Url, page_origin: &str) -> R
             "cross-origin script blocked: {url} (page origin {page_origin})"
         ));
     }
-    let resp = client.get(url.clone()).send().await?;
+    let mut request = client.get(url.clone());
+    if let Some(header) = jar.and_then(|j| j.lock().ok()?.header_for(url)) {
+        request = request.header(reqwest::header::COOKIE, header);
+    }
+    let resp = request.send().await?;
+    if let Some(jar) = jar {
+        record_cookies(jar, resp.url(), resp.headers());
+    }
     if !resp.status().is_success() {
         return Err(anyhow!("HTTP {}", resp.status()));
     }

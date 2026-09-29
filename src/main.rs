@@ -3,14 +3,19 @@
 //! No browser. No widget on the page. No token to paste. The client on the
 //! other end is an ordinary MCP client that has never heard of WebMCP.
 
+mod cookies;
 mod declarative;
+mod engine;
 mod fetch;
+mod http;
 mod isolate;
 mod mcp;
 mod modules;
+mod server;
+mod session;
 mod tool;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -23,6 +28,15 @@ use serde_json::json;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// How clients reach the server.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Transport {
+    /// One page, spoken over stdin and stdout. What an MCP client spawns.
+    Stdio,
+    /// Many declared sites, each at its own path.
+    Http,
 }
 
 #[derive(Subcommand)]
@@ -41,14 +55,63 @@ enum Command {
         /// For diagnosing why a page did not expose what you expected.
         #[arg(long, value_name = "JS")]
         eval: Option<String>,
+        /// Run in a named session, so the page sees the storage it left
+        /// behind last time. Two ids are two unrelated visitors.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
-    /// Serve the page's tools over MCP on stdio.
+    /// Serve a page's tools over MCP.
+    ///
+    /// Over stdio, which is what an MCP client spawns:
+    ///
+    ///   conduit serve https://notes.example --session alice
+    ///
+    /// Or over HTTP, where the sites are declared up front and each becomes a
+    /// route. A caller chooses which site to talk to, never which URL to fetch,
+    /// and never which session to speak for:
+    ///
+    ///   conduit serve --transport http --site notes=https://notes.example
+    ///   POST /notes
     Serve {
-        /// A URL, or a path to a local HTML file.
-        target: String,
+        /// A URL, or a path to a local HTML file. Only for `--transport stdio`;
+        /// over HTTP the sites are named with `--site`.
+        target: Option<String>,
+        /// How clients reach this server.
+        #[arg(long, value_enum, default_value_t = Transport::Stdio)]
+        transport: Transport,
         /// Skip JavaScript entirely — declarative `<form>` tools only.
         #[arg(long)]
         no_scripts: bool,
+
+        // --- stdio ---
+        /// Run in a named session, so the page sees the storage it left behind
+        /// last time. Two ids are two unrelated visitors.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+
+        // --- http ---
+        /// A site to serve, as `name=url`. Repeatable. The name is both the
+        /// route and the session, so mounting one site twice under two names
+        /// gives it two independent browser profiles.
+        #[arg(long = "site", value_name = "NAME=URL")]
+        sites: Vec<String>,
+        /// Address to bind.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        /// Keep nothing between requests: no cookies, no storage.
+        #[arg(long)]
+        stateless: bool,
+        /// Browser origins permitted to call this server, e.g.
+        /// `https://app.example.com`. Empty means none, which is right when the
+        /// clients are MCP hosts rather than web pages. The MCP spec requires
+        /// this check to prevent DNS rebinding.
+        #[arg(long = "allow-origin", value_name = "ORIGIN")]
+        allow_origins: Vec<String>,
+        /// A `Host` value this server answers to, e.g. `conduit.example.com`.
+        /// Loopback is always permitted; anything else must be declared, or a
+        /// deployed server rejects every request. Repeatable.
+        #[arg(long = "allow-host", value_name = "HOST")]
+        allow_hosts: Vec<String>,
     },
 }
 
@@ -59,7 +122,7 @@ enum Command {
 ///
 /// The main thread's stack is fixed at whatever the OS gave it, so the work
 /// runs on a thread we size ourselves.
-const ENGINE_STACK: usize = 256 * 1024 * 1024;
+pub const ENGINE_STACK: usize = 256 * 1024 * 1024;
 
 fn main() -> Result<()> {
     std::thread::Builder::new()
@@ -95,29 +158,185 @@ async fn run() -> Result<()> {
             json: as_json,
             no_scripts,
             eval,
+            session: session_id,
         } => {
-            let session = mcp::Session::load(&target, !no_scripts).await?;
+            let mut handle = open_session(session_id.as_deref())?;
+            let mut loaded = mcp::Session::load(&target, !no_scripts, handle.as_ref()).await?;
+
             if let Some(expr) = eval {
-                println!("{}", session.eval(&expr)?);
+                println!("{}", loaded.eval(&expr)?);
+                commit_session(handle.as_mut(), &mut loaded)?;
                 return Ok(());
             }
             if as_json {
-                print_json(&session, &target);
+                print_json(&loaded, &target);
             } else {
-                print_report(&session, &target);
+                print_report(&loaded, &target);
+            }
+            commit_session(handle.as_mut(), &mut loaded)?;
+        }
+        Command::Serve {
+            target,
+            transport,
+            no_scripts,
+            session: session_id,
+            sites,
+            bind,
+            stateless,
+            allow_origins,
+            allow_hosts,
+        } => match transport {
+            Transport::Stdio => {
+                // The misplaced flag is checked before the missing argument:
+                // someone who passed `--site` made one mistake, and telling
+                // them a page is missing would send them to fix the wrong one.
+                //
+                // Rejected rather than ignored, too. A flag that silently does
+                // nothing is worse than one that is refused, because the person
+                // who passed it believes it took effect.
+                if !sites.is_empty() {
+                    anyhow::bail!("`--site` belongs to `--transport http`; over stdio the page is the argument");
+                }
+                if stateless {
+                    anyhow::bail!("`--stateless` belongs to `--transport http`; over stdio, omit `--session` instead");
+                }
+                if !allow_origins.is_empty() {
+                    anyhow::bail!(
+                        "`--allow-origin` belongs to `--transport http`; stdio has no origins"
+                    );
+                }
+
+                let target = target.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "`serve` over stdio needs a page: conduit serve <url> [--session <id>]"
+                    )
+                })?;
+
+                serve_stdio(&target, session_id, no_scripts).await?;
+            }
+            Transport::Http => {
+                if let Some(target) = target {
+                    anyhow::bail!(
+                        "over HTTP a page is named, not positional: \
+                         --site <name>={target}"
+                    );
+                }
+                if session_id.is_some() {
+                    anyhow::bail!(
+                        "`--session` belongs to `--transport stdio`. Over HTTP the \
+                         mount is the session, so the caller cannot choose one: \
+                         `--site alice=<url>` serves session `alice` at /alice"
+                    );
+                }
+                if sites.is_empty() {
+                    anyhow::bail!("`--transport http` needs at least one `--site <name>=<url>`");
+                }
+
+                let addr: std::net::SocketAddr = bind
+                    .parse()
+                    .with_context(|| format!("`{bind}` is not an address:port"))?;
+
+                let sites = sites
+                    .iter()
+                    .map(|spec| http::parse_site(spec))
+                    .collect::<Result<Vec<_>>>()?;
+
+                // Two mounts under one name would make the second unreachable,
+                // which is the kind of thing to say at startup rather than
+                // leave someone to discover.
+                let mut seen = std::collections::HashSet::new();
+                for site in &sites {
+                    if !seen.insert(&site.name) {
+                        anyhow::bail!("`{}` is declared more than once", site.name);
+                    }
+                }
+
+                http::serve(
+                    addr,
+                    http::Config {
+                        sites,
+                        allow_origins,
+                        allow_hosts,
+                        no_scripts,
+                        stateless,
+                    },
+                )
+                .await?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// Open a session, or none at all. An unusable session id is worth failing on
+/// rather than silently falling back to a throwaway run — the caller asked for
+/// persistence and would not get it.
+fn open_session(id: Option<&str>) -> Result<Option<session::Handle>> {
+    match id {
+        Some(id) => Ok(Some(session::Handle::open(id)?)),
+        None => Ok(None),
+    }
+}
+
+/// Write the page's storage back. A snapshot failure is reported but does not
+/// fail the command: the work the user asked for has already been done, and
+/// losing it is bad enough without also hiding the reason.
+fn commit_session(handle: Option<&mut session::Handle>, loaded: &mut mcp::Session) -> Result<()> {
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+
+    match loaded.snapshot() {
+        Ok(Some(storage)) => {
+            let origin = loaded.origin();
+            match handle.commit(&origin, &storage, loaded.cookies()) {
+                Ok(path) => {
+                    tracing::debug!(target: "conduit", "session saved to {}", path.display())
+                }
+                Err(e) => eprintln!("conduit: could not save session {}: {e}", handle.id()),
             }
         }
-        Command::Serve { target, no_scripts } => {
-            let session = mcp::Session::load(&target, !no_scripts).await?;
-            // stdout is the MCP transport; status goes to stderr.
-            eprintln!(
-                "conduit: serving {} tool(s) from {target} (engine: {})",
-                session.tools().len(),
-                session.engine.as_str()
-            );
-            mcp::serve(session, &target).await?;
+        Ok(None) => {
+            // No engine ran, but the document fetch may still have been handed
+            // cookies, and a --no-scripts run should not throw a login away.
+            let origin = loaded.origin();
+            if let Err(e) = handle.commit(&origin, "{}", loaded.cookies()) {
+                eprintln!("conduit: could not save session {}: {e}", handle.id());
+            }
         }
+        Err(e) => eprintln!("conduit: could not snapshot session {}: {e}", handle.id()),
     }
+    Ok(())
+}
+
+async fn serve_stdio(target: &str, session_id: Option<String>, no_scripts: bool) -> Result<()> {
+    let handle = engine::spawn(target.to_string(), session_id.clone(), no_scripts).await?;
+    let description = handle.describe().await?;
+
+    // stdout is the MCP transport; status goes to stderr.
+    eprintln!(
+        "conduit: serving {} tool(s) from {target} (engine: {}){}",
+        description.tool_count,
+        description.engine,
+        match &session_id {
+            Some(id) => format!(" [session: {id}]"),
+            None => String::new(),
+        }
+    );
+
+    let service = server::Conduit::new(handle, target).await;
+    let running = rmcp::serve_server(service, rmcp::transport::io::stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("starting the MCP server: {e}"))?;
+
+    // Returns when the client closes the pipe. Dropping the handle then closes
+    // the engine's channel, and the engine writes its session back as it shuts
+    // down.
+    running
+        .waiting()
+        .await
+        .map_err(|e| anyhow::anyhow!("serving MCP: {e}"))?;
 
     Ok(())
 }
