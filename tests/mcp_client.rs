@@ -294,12 +294,22 @@ async fn no_response_frame_is_empty_for_a_strict_parser() {
 }
 
 /// A POST written by hand, so the bytes on the wire are the bytes asserted on.
+///
+/// Deliberately more forgiving than it looks, because this failed once on a CI
+/// runner and the message — `reading the response` — said nothing about what
+/// had arrived. Two changes came out of that:
+///
+/// - a reset or a truncated read is only an error when nothing useful arrived.
+///   `Connection: close` means the server hangs up after answering, and a peer
+///   that closes hard enough turns the final read into `ConnectionReset`
+///   instead of a clean EOF. With a complete response already buffered, that
+///   distinction is noise.
+/// - every failure carries the bytes received so far. A test that fails on a
+///   machine you cannot attach to has to explain itself in the message.
 async fn post(address: &str, path: &str, body: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut stream = tokio::net::TcpStream::connect(address)
-        .await
-        .expect("connecting to conduit");
+    let mut stream = connect(address).await;
 
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\n\
@@ -314,12 +324,85 @@ async fn post(address: &str, path: &str, body: &str) -> String {
         .expect("sending the request");
 
     let mut raw = Vec::new();
-    tokio::time::timeout(Duration::from_secs(30), stream.read_to_end(&mut raw))
-        .await
-        .expect("conduit should answer")
-        .expect("reading the response");
+    let mut chunk = [0u8; 4096];
+
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(60), stream.read(&mut chunk)).await;
+
+        match read {
+            Ok(Ok(0)) => break, // Clean EOF: the server closed, as asked.
+            Ok(Ok(n)) => raw.extend_from_slice(&chunk[..n]),
+            Ok(Err(e)) => {
+                if complete(&raw) {
+                    break;
+                }
+                panic!(
+                    "reading the response failed ({e}) with {} byte(s) received:\n{}",
+                    raw.len(),
+                    String::from_utf8_lossy(&raw)
+                );
+            }
+            Err(_) => panic!(
+                "conduit did not finish answering within 60s; {} byte(s) received:\n{}",
+                raw.len(),
+                String::from_utf8_lossy(&raw)
+            ),
+        }
+
+        // `Connection: close` should give a clean EOF, but a peer that resets
+        // instead would otherwise cost the whole timeout for a response that
+        // already arrived in full.
+        if complete(&raw) {
+            break;
+        }
+    }
+
+    assert!(
+        !raw.is_empty(),
+        "conduit closed the connection without sending anything"
+    );
 
     String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// Whether the buffer holds a whole HTTP response: headers, plus a body as long
+/// as `Content-Length` promised.
+fn complete(raw: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(raw);
+    let Some((headers, body)) = text.split_once("\r\n\r\n") else {
+        return false;
+    };
+
+    let declared = headers.lines().find_map(|line| {
+        line.to_ascii_lowercase()
+            .strip_prefix("content-length:")?
+            .trim()
+            .parse::<usize>()
+            .ok()
+    });
+
+    match declared {
+        Some(length) => body.len() >= length,
+        // No Content-Length means the body is delimited by the close, so the
+        // response is only complete when the connection ends.
+        None => false,
+    }
+}
+
+/// The server is listening by the time this runs — it said so on stderr — but a
+/// runner under load can still refuse the first connection.
+async fn connect(address: &str) -> tokio::net::TcpStream {
+    let mut last = None;
+    for attempt in 0..20 {
+        match tokio::net::TcpStream::connect(address).await {
+            Ok(stream) => return stream,
+            Err(e) => {
+                last = Some(e);
+                tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
+            }
+        }
+    }
+    panic!("could not connect to conduit at {address}: {last:?}");
 }
 
 /// Wait for the line conduit prints once it is listening, and take the address
