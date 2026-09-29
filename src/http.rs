@@ -112,7 +112,11 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
     let services: Services = Arc::new(Mutex::new(HashMap::new()));
     let config = Arc::new(config);
 
-    eprintln!("conduit: listening on http://{addr}");
+    // The address the OS actually gave us, which differs from what was asked
+    // for whenever the port was 0 — and a caller that cannot discover the port
+    // cannot connect to it.
+    let bound = listener.local_addr().unwrap_or(addr);
+    eprintln!("conduit: listening on http://{bound}");
     for site in &config.sites {
         eprintln!(
             "conduit:   POST /{}  ->  {}{}",
@@ -222,6 +226,44 @@ async fn route(
     }
 }
 
+/// Buffer the body so it can be logged, then hand the request on.
+///
+/// Bodies here are single JSON-RPC messages, so this costs nothing worth
+/// measuring, and `CONDUIT_LOG=debug` showing exactly what a client sent is the
+/// difference between diagnosing an interoperability problem and guessing at
+/// it. `StreamableHttpService` is generic over the body type, so it takes the
+/// buffered request unchanged.
+async fn buffer(req: Request<hyper::body::Incoming>) -> Result<Request<Full<Bytes>>> {
+    let (parts, body) = req.into_parts();
+    let bytes = body.collect().await?.to_bytes();
+
+    if tracing::enabled!(target: "http", tracing::Level::DEBUG) {
+        let header = |name: &str| {
+            parts
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string()
+        };
+        tracing::debug!(
+            target: "http",
+            "{} {} | accept={} content-type={} mcp-session-id={} mcp-protocol-version={} origin={} host={} | {}",
+            parts.method,
+            parts.uri.path(),
+            header("accept"),
+            header("content-type"),
+            header("mcp-session-id"),
+            header("mcp-protocol-version"),
+            header("origin"),
+            header("host"),
+            String::from_utf8_lossy(&bytes),
+        );
+    }
+
+    Ok(Request::from_parts(parts, Full::new(bytes)))
+}
+
 async fn connect(
     req: Request<hyper::body::Incoming>,
     site: Site,
@@ -293,10 +335,23 @@ async fn connect(
         }
     };
 
-    service
-        .call(req)
+    let response = service
+        .call(buffer(req).await?)
         .await
-        .map_err(|e| anyhow!("streamable http transport: {e}"))
+        .map_err(|e| anyhow!("streamable http transport: {e}"))?;
+
+    tracing::debug!(
+        target: "http",
+        "-> {} {}",
+        response.status(),
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+    );
+
+    Ok(response)
 }
 
 #[cfg(test)]

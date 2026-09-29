@@ -42,3 +42,6 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+rmcp = { version = "3.5.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
