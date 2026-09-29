@@ -119,7 +119,7 @@ pub async fn spawn(target: String, session_id: Option<String>, no_scripts: bool)
                 let mut handle = match session_id.as_deref().map(session::Handle::open) {
                     Some(Ok(handle)) => Some(handle),
                     Some(Err(e)) => {
-                        let _ = ready_tx.send(Err(e.to_string()));
+                        let _ = ready_tx.send(Err(format!("{e:#}")));
                         return;
                     }
                     None => None,
@@ -129,7 +129,11 @@ pub async fn spawn(target: String, session_id: Option<String>, no_scripts: bool)
                 {
                     Ok(page) => page,
                     Err(e) => {
-                        let _ = ready_tx.send(Err(e.to_string()));
+                        // `{:#}` walks the whole chain. `to_string()` keeps only
+                        // the outermost context, so "fetching <url>" would
+                        // arrive without the reason it failed — a refused
+                        // connection and a 500 from the site read identically.
+                        let _ = ready_tx.send(Err(format!("{e:#}")));
                         return;
                     }
                 };

@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! conduit http --site notes=https://notes.example
-//! POST /mcp/v1/notes
+//! POST /notes
 //! ```
 //!
 //! Both halves of that matter.
@@ -61,6 +61,9 @@ pub struct Config {
     pub stateless: bool,
 }
 
+/// Paths that are the server's own, so a site may not take them.
+const RESERVED: &[&str] = &["healthz"];
+
 /// `--site name=https://example.com`
 ///
 /// The name becomes a path segment and a directory name, so it is restricted
@@ -73,6 +76,12 @@ pub fn parse_site(spec: &str) -> Result<Site> {
     let name = name.trim();
     crate::session::validate_id(name)
         .with_context(|| format!("`{name}` is not usable as a site name"))?;
+
+    if RESERVED.contains(&name) {
+        return Err(anyhow!(
+            "`{name}` is reserved by the server; choose another site name"
+        ));
+    }
 
     let parsed =
         url::Url::parse(url.trim()).with_context(|| format!("`{url}` is not a valid URL"))?;
@@ -104,7 +113,7 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
     eprintln!("conduit: listening on http://{addr}");
     for site in &config.sites {
         eprintln!(
-            "conduit:   POST /mcp/v1/{}  ->  {}{}",
+            "conduit:   POST /{}  ->  {}{}",
             site.name,
             site.url,
             if config.stateless {
@@ -172,17 +181,15 @@ async fn route(
 
     // What this server serves. Names only: the URLs behind them are the
     // operator's business, not a caller's.
-    if req.method() == Method::GET && (path == "/mcp/v1" || path == "/mcp/v1/") {
+    if req.method() == Method::GET && path == "/" {
         let names: Vec<&str> = config.sites.iter().map(|s| s.name.as_str()).collect();
         return Ok(json_response(StatusCode::OK, json!({"sites": names})));
     }
 
-    let Some(name) = path.strip_prefix("/mcp/v1/") else {
-        return Ok(json_response(
-            StatusCode::NOT_FOUND,
-            rpc_error(-32601, format!("no route for {path}")),
-        ));
-    };
+    // A site is served at its own name. There is no version prefix: this server
+    // speaks whatever MCP version the SDK negotiates per connection, so a
+    // number in the path would only be a second, staler answer to that.
+    let name = path.trim_start_matches('/');
 
     // An unknown name and a known one must be told apart by the operator's
     // config, never by anything in the request.
@@ -191,7 +198,7 @@ async fn route(
             StatusCode::NOT_FOUND,
             rpc_error(
                 -32601,
-                format!("`{name}` is not a site this server serves; GET /mcp/v1 lists them"),
+                format!("`{name}` is not a site this server serves; GET / lists them"),
             ),
         ));
     };
@@ -200,10 +207,14 @@ async fn route(
     match connect(req, site, pool, services, config).await {
         Ok(response) => Ok(response),
         Err(e) => {
-            tracing::warn!(target: "conduit", "{peer}: {e}");
+            // `{:#}` rather than `{}`: the outermost context alone says
+            // "fetching <url>" and drops the reason, so a refused connection
+            // and a 500 from the site look identical to whoever is debugging.
+            let detail = format!("{e:#}");
+            tracing::warn!(target: "conduit", "{peer}: {detail}");
             Ok(json_response(
                 StatusCode::BAD_GATEWAY,
-                rpc_error(-32603, e.to_string()),
+                rpc_error(-32603, detail),
             ))
         }
     }
@@ -278,6 +289,11 @@ mod tests {
         assert!(parse_site("a/b=https://a.example").is_err());
         assert!(parse_site("=https://a.example").is_err());
         assert!(parse_site("no-equals-sign").is_err());
+    }
+
+    #[test]
+    fn a_site_cannot_shadow_the_servers_own_paths() {
+        assert!(parse_site("healthz=https://a.example").is_err());
     }
 
     #[test]

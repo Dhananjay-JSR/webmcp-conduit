@@ -70,7 +70,7 @@ enum Command {
     /// never which URL to fetch, and never which session to speak for.
     ///
     ///   conduit http --site notes=https://notes.example
-    ///   POST /mcp/v1/notes
+    ///   POST /notes
     Http {
         /// A site to serve, as `name=url`. Repeatable. The name is the route
         /// and the session, so mounting one site twice under two names gives it
