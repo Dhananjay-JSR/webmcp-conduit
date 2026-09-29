@@ -80,7 +80,6 @@ as a child process and talks to it over stdin and stdout.
 | `conduit serve <url>` | Speak MCP over stdio — what an MCP client spawns |
 | `conduit serve --transport http --site <name>=<url>` | Serve declared sites over HTTP, each at `/<name>` |
 | `conduit probe <url>` | Report what the page exposes, and what failed |
-| `conduit session list\|show\|rm` | Inspect and delete saved sessions |
 | `--session <id>` | Remember cookies and storage between runs |
 | `--json` | Machine-readable output |
 | `--eval '<js>'` | Evaluate an expression in the loaded page |
@@ -100,6 +99,11 @@ conduit serve https://example.com --session alice
 ```
 
 Two ids are two unrelated visitors, and neither can see the other's data.
+
+Sessions are directories of JSON under `CONDUIT_SESSION_DIR`, or the platform
+data directory. conduit has no commands for listing or deleting them: it serves
+pages, and the format is plain enough that `ls` and `rm` are the management
+tools.
 
 ### Over HTTP
 

@@ -8,13 +8,18 @@
 //! behalf of more than one person.
 //!
 //! State lives in a plain directory of JSON, one directory per session, under
-//! the platform's data directory. JSON rather than a database because a session
-//! is something you will want to read, diff and delete by hand.
+//! the platform's data directory, overridable with `CONDUIT_SESSION_DIR`.
+//!
+//! There is deliberately no management surface here — no listing, no deletion.
+//! conduit serves pages; what a fleet of sessions looks like and when one should
+//! be discarded are questions for whatever operates it. The format is plain
+//! JSON in named directories precisely so that answering them needs nothing
+//! from conduit: `ls`, `cat` and `rm` are the API.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Bumped when the on-disk shape changes incompatibly. An older conduit meeting
 /// a newer session should say so rather than silently restore half of it.
@@ -57,47 +62,6 @@ pub struct Cookie {
     pub secure: bool,
 }
 
-impl State {
-    pub fn is_empty(&self) -> bool {
-        self.cookies.is_empty() && self.storage.values().all(storage_is_empty)
-    }
-
-    pub fn origins(&self) -> Vec<&str> {
-        self.storage.keys().map(|s| s.as_str()).collect()
-    }
-
-    /// A one-line summary for `conduit session list`.
-    pub fn summary(&self) -> String {
-        let mut keys = 0usize;
-        let mut databases = 0usize;
-        let mut records = 0usize;
-
-        for blob in self.storage.values() {
-            keys += blob
-                .get("localStorage")
-                .and_then(|v| v.as_object())
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if let Some(dbs) = blob.get("databases").and_then(|v| v.as_array()) {
-                databases += dbs.len();
-                records += dbs
-                    .iter()
-                    .filter_map(|db| db.get("stores").and_then(|s| s.as_array()))
-                    .flatten()
-                    .filter_map(|store| store.get("records").and_then(|r| r.as_array()))
-                    .map(|r| r.len())
-                    .sum::<usize>();
-            }
-        }
-
-        format!(
-            "{} origin(s), {keys} localStorage key(s), {databases} database(s), {records} record(s), {} cookie(s)",
-            self.storage.len(),
-            self.cookies.len()
-        )
-    }
-}
-
 fn storage_is_empty(storage: &serde_json::Value) -> bool {
     let no_local = storage
         .get("localStorage")
@@ -132,10 +96,6 @@ impl Store {
         Ok(Self {
             root: default_root()?.join("sessions"),
         })
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Read a session, or a blank one if it has never been used. A first run is
@@ -184,30 +144,6 @@ impl Store {
         Ok(path)
     }
 
-    pub fn list(&self) -> Result<Vec<String>> {
-        if !self.root.exists() {
-            return Ok(Vec::new());
-        }
-        let mut ids: Vec<String> = std::fs::read_dir(&self.root)
-            .with_context(|| format!("reading {}", self.root.display()))?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().is_dir())
-            .filter(|entry| entry.path().join("state.json").exists())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .collect();
-        ids.sort();
-        Ok(ids)
-    }
-
-    pub fn remove(&self, id: &str) -> Result<bool> {
-        let dir = self.dir_for(id)?;
-        if !dir.exists() {
-            return Ok(false);
-        }
-        std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
-        Ok(true)
-    }
-
     pub fn dir_for(&self, id: &str) -> Result<PathBuf> {
         Ok(self.root.join(validate_id(id)?))
     }
@@ -244,11 +180,6 @@ impl Handle {
     #[allow(dead_code)]
     pub fn state(&self) -> &State {
         &self.state
-    }
-
-    #[allow(dead_code)]
-    pub fn path(&self) -> Result<PathBuf> {
-        self.store.dir_for(&self.id)
     }
 
     /// The storage this session holds for one origin, as the JSON blob
@@ -386,9 +317,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("conduit-test-{}", std::process::id()));
         let store = Store { root: dir.clone() };
 
-        // Never used is not an error.
-        let fresh = store.load("demo").unwrap();
-        assert!(fresh.is_empty());
+        // Never used is not an error: it is how every session starts.
+        assert!(store.load("demo").unwrap().storage.is_empty());
 
         let state = State {
             version: FORMAT_VERSION,
@@ -398,17 +328,51 @@ mod tests {
                 "https://example.com".to_string(),
                 serde_json::json!({"localStorage": {"a": "1"}, "databases": []}),
             )]),
-            cookies: vec![],
+            cookies: vec![Cookie {
+                name: "sid".into(),
+                value: "abc".into(),
+                domain: "example.com".into(),
+                path: "/".into(),
+                expires: Some(i64::MAX),
+                secure: true,
+            }],
         };
         store.save("demo", &state).unwrap();
 
         let read = store.load("demo").unwrap();
-        assert_eq!(read.origins(), vec!["https://example.com"]);
-        assert!(!read.is_empty());
-        assert_eq!(store.list().unwrap(), vec!["demo".to_string()]);
+        assert_eq!(
+            read.storage.keys().collect::<Vec<_>>(),
+            vec!["https://example.com"]
+        );
+        assert_eq!(read.cookies.len(), 1);
+        assert_eq!(read.cookies[0].value, "abc");
 
-        assert!(store.remove("demo").unwrap());
-        assert!(!store.remove("demo").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn storage_is_offered_only_to_the_origin_that_wrote_it() {
+        let dir = std::env::temp_dir().join(format!("conduit-origin-{}", std::process::id()));
+        let store = Store { root: dir.clone() };
+        let mut handle = Handle {
+            store,
+            id: "demo".into(),
+            state: State::default(),
+        };
+
+        handle
+            .commit(
+                "https://a.example",
+                r#"{"localStorage":{"token":"secret"},"databases":[]}"#,
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert!(handle.storage_for("https://a.example").is_some());
+        // The same session visiting a second site must not hand it the first
+        // site's storage — that is the leak per-origin keying exists to stop.
+        assert!(handle.storage_for("https://b.example").is_none());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

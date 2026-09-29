@@ -113,26 +113,6 @@ enum Command {
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
     },
-    /// Inspect and manage saved sessions.
-    Session {
-        #[command(subcommand)]
-        command: SessionCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum SessionCommand {
-    /// List saved sessions.
-    List,
-    /// Show what one session is holding.
-    Show {
-        id: String,
-        /// Print the raw state, including every stored record.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Delete a session and everything in it.
-    Rm { id: String },
 }
 
 /// The engine needs a deep stack. A framework reconciler recurses once per
@@ -284,7 +264,6 @@ async fn run() -> Result<()> {
                 .await?;
             }
         },
-        Command::Session { command } => run_session_command(command)?,
     }
 
     Ok(())
@@ -328,88 +307,6 @@ fn commit_session(handle: Option<&mut session::Handle>, loaded: &mut mcp::Sessio
         }
         Err(e) => eprintln!("conduit: could not snapshot session {}: {e}", handle.id()),
     }
-    Ok(())
-}
-
-fn run_session_command(command: SessionCommand) -> Result<()> {
-    let store = session::Store::open()?;
-
-    match command {
-        SessionCommand::List => {
-            let ids = store.list()?;
-            if ids.is_empty() {
-                println!("No sessions yet. Create one with `conduit probe <url> --session <id>`.");
-                println!("They will live in {}", store.root().display());
-                return Ok(());
-            }
-            println!("{}", store.root().display());
-            println!();
-            for id in ids {
-                match store.load(&id) {
-                    Ok(state) => println!("  {id}\n      {}", state.summary()),
-                    Err(e) => println!("  {id}\n      unreadable: {e}"),
-                }
-            }
-        }
-        SessionCommand::Show { id, json: as_json } => {
-            let state = store.load(&id)?;
-            if as_json {
-                println!("{}", serde_json::to_string_pretty(&state)?);
-                return Ok(());
-            }
-            if state.is_empty() {
-                println!("Session {id} is empty.");
-                return Ok(());
-            }
-            println!("Session {id}");
-            println!("  stored at  {}", store.dir_for(&id)?.display());
-            println!("  created    {}", state.created);
-            println!("  updated    {}", state.updated);
-            println!("  {}", state.summary());
-            for origin in state.origins() {
-                println!();
-                println!("  {origin}");
-                if let Some(blob) = state.storage.get(origin) {
-                    if let Some(local) = blob.get("localStorage").and_then(|v| v.as_object()) {
-                        for key in local.keys() {
-                            println!("      localStorage  {key}");
-                        }
-                    }
-                    if let Some(dbs) = blob.get("databases").and_then(|v| v.as_array()) {
-                        for db in dbs {
-                            let name = db.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                            for store_spec in db
-                                .get("stores")
-                                .and_then(|v| v.as_array())
-                                .unwrap_or(&vec![])
-                            {
-                                let store_name = store_spec
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("?");
-                                let count = store_spec
-                                    .get("records")
-                                    .and_then(|v| v.as_array())
-                                    .map(|r| r.len())
-                                    .unwrap_or(0);
-                                println!(
-                                    "      indexedDB     {name}/{store_name} ({count} record(s))"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        SessionCommand::Rm { id } => {
-            if store.remove(&id)? {
-                println!("Deleted session {id}.");
-            } else {
-                println!("No session named {id}.");
-            }
-        }
-    }
-
     Ok(())
 }
 
