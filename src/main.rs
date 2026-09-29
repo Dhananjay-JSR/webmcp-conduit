@@ -107,6 +107,11 @@ enum Command {
         /// this check to prevent DNS rebinding.
         #[arg(long = "allow-origin", value_name = "ORIGIN")]
         allow_origins: Vec<String>,
+        /// A `Host` value this server answers to, e.g. `conduit.example.com`.
+        /// Loopback is always permitted; anything else must be declared, or a
+        /// deployed server rejects every request. Repeatable.
+        #[arg(long = "allow-host", value_name = "HOST")]
+        allow_hosts: Vec<String>,
     },
     /// Inspect and manage saved sessions.
     Session {
@@ -199,6 +204,7 @@ async fn run() -> Result<()> {
             bind,
             stateless,
             allow_origins,
+            allow_hosts,
         } => match transport {
             Transport::Stdio => {
                 // The misplaced flag is checked before the missing argument:
@@ -270,6 +276,7 @@ async fn run() -> Result<()> {
                     http::Config {
                         sites,
                         allow_origins,
+                        allow_hosts,
                         no_scripts,
                         stateless,
                     },

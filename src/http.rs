@@ -56,6 +56,8 @@ pub struct Site {
 pub struct Config {
     pub sites: Vec<Site>,
     pub allow_origins: Vec<String>,
+    /// Extra `Host` values this server answers to, beyond loopback.
+    pub allow_hosts: Vec<String>,
     pub no_scripts: bool,
     /// Run without persistence: no cookies or storage kept between requests.
     pub stateless: bool,
@@ -227,6 +229,11 @@ async fn connect(
     services: Services,
     config: Arc<Config>,
 ) -> Result<Response<BoxBody>> {
+    // Loopback stays permitted whatever else is declared, so that a deployed
+    // server is still reachable from a shell on the box it runs on.
+    let mut allowed_hosts: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    allowed_hosts.extend(config.allow_hosts.iter().cloned());
+
     // The mount is the session. Nothing in the request chooses it.
     let session_id = (!config.stateless).then(|| site.name.clone());
 
@@ -250,12 +257,33 @@ async fn connect(
                     // the same state, not two copies of it.
                     move || Ok(conduit.clone()),
                     Arc::new(LocalSessionManager::default()),
-                    // The spec requires Origin validation to prevent DNS
-                    // rebinding. `enforce_origin_validation` is not optional
-                    // here: an empty allowlist otherwise means *no* checking at
-                    // all rather than "reject every browser origin", so leaving
-                    // it off gives a server that looks locked down and is not.
                     StreamableHttpServerConfig::default()
+                        // Plain JSON responses rather than an SSE stream.
+                        //
+                        // conduit never sends anything before a response — no
+                        // sampling, no progress, no server-initiated requests —
+                        // so a stream buys nothing, and the SDK falls back to
+                        // SSE by itself if a handler ever does emit something.
+                        //
+                        // It also avoids a real interoperability problem.
+                        // Legacy session mode opens every stream with a priming
+                        // event whose data field is empty, and a client that
+                        // JSON-parses each `data:` gets `JSON.parse("")` and
+                        // reports a syntax error before it ever sees a message.
+                        // Postman's MCP client does exactly that.
+                        .with_legacy_session_mode(false)
+                        .with_json_response(true)
+                        // Host values this server answers to. The SDK defaults
+                        // to loopback only, which is right for a local server
+                        // and would 403 every request to a deployed one, so the
+                        // public hostname has to be declared.
+                        .with_allowed_hosts(allowed_hosts.clone())
+                        // The spec requires Origin validation to prevent DNS
+                        // rebinding. `enforce_origin_validation` is not
+                        // optional here: an empty allowlist otherwise means
+                        // *no* checking at all rather than "reject every
+                        // browser origin", so leaving it off gives a server
+                        // that looks locked down and is not.
                         .with_allowed_origins(config.allow_origins.clone())
                         .enforce_origin_validation(),
                 );
