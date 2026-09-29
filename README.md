@@ -77,13 +77,49 @@ as a child process and talks to it over stdin and stdout.
 
 | | |
 |---|---|
-| `conduit serve <url>` | Speak MCP over stdio |
+| `conduit serve <url>` | Speak MCP over stdio — what an MCP client spawns |
+| `conduit serve --transport http --site <name>=<url>` | Serve declared sites over HTTP, each at `/<name>` |
 | `conduit probe <url>` | Report what the page exposes, and what failed |
+| `conduit session list\|show\|rm` | Inspect and delete saved sessions |
+| `--session <id>` | Remember cookies and storage between runs |
 | `--json` | Machine-readable output |
 | `--eval '<js>'` | Evaluate an expression in the loaded page |
 | `--no-scripts` | Declarative `<form>` tools only, no JavaScript |
 
 `<url>` may also be a path to a local HTML file.
+
+### Sessions
+
+By default a page boots with empty storage every time, which makes a local-first
+app look permanently new and makes "sign in, then do the thing" impossible to
+express. A named session remembers cookies, `localStorage` and IndexedDB between
+runs:
+
+```
+conduit serve https://example.com --session alice
+```
+
+Two ids are two unrelated visitors, and neither can see the other's data.
+
+### Over HTTP
+
+Served sites are declared up front. A caller picks which site to talk to, never
+which URL to fetch and never which session to speak for — so the server is not
+an open proxy, and nobody can borrow someone else's signed-in state by naming
+it. Mounting one site twice gives it two independent profiles:
+
+```
+conduit serve --transport http \
+  --site alice=https://example.com \
+  --site bob=https://example.com
+```
+
+```
+POST /alice     MCP, as alice
+POST /bob       MCP, as bob
+GET  /          {"sites":["alice","bob"]}
+GET  /healthz
+```
 
 ## How it works
 
