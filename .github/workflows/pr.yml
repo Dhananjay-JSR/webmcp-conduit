@@ -79,8 +79,13 @@ jobs:
           base="${{ github.event.pull_request.base.sha }}"
 
           # Every test the suite knows about, by full path.
+          #
+          # `|| true` on both pipelines because the shell is `bash -e -o
+          # pipefail` and grep exits 1 when it matches nothing. A PR that adds
+          # no test functions — this job arrived in one — is the ordinary case,
+          # not an error, and without this the step dies before it can say so.
           cargo test -- --list 2>/dev/null \
-            | grep ': test$' | sed 's/: test$//' | sort -u > all.txt
+            | grep ': test$' | sed 's/: test$//' | sort -u > all.txt || true
 
           # Function names this PR adds. Non-test functions come along too, and
           # are dropped by the intersection below — a name only counts as a new
@@ -88,7 +93,8 @@ jobs:
           git diff "$base"...HEAD -- '*.rs' \
             | grep -E '^\+\s*(async )?fn ' \
             | sed -E 's/.*fn ([a-zA-Z0-9_]+).*/\1/' \
-            | sort -u > added.txt
+            | sort -u > added.txt || true
+          touch added.txt all.txt
 
           : > new.txt
           while read -r test; do
