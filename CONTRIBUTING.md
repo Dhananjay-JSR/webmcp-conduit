@@ -116,7 +116,7 @@ it first.
 
 A release is cut by **the version in `Cargo.toml` changing on main**. Bump it,
 merge, and the rest follows — tag, binaries, checksums, GitHub release, npm
-packages.
+packages, and the crate on crates.io.
 
 ```bash
 # in a PR
@@ -141,10 +141,32 @@ Each target builds on a native runner and every binary is run — `--version`
 and a real probe against a fixture — before it is packaged, so a release
 cannot contain something that does not work.
 
-crates.io is deliberately not part of this. Publishing there cannot be undone —
-a version can be yanked but never replaced, and the name is claimed forever —
-and it earns little that the other channels do not already cover. Rust users
-can install from git in the meantime.
+### Publishing
+
+Two registries, both published by the same version bump, and both skipped with
+a warning rather than a failure when their token is missing — a release should
+not fail because one channel is unconfigured.
+
+| secret | registry |
+| --- | --- |
+| `NPM_TOKEN` | npm |
+| `CARGO_REGISTRY_TOKEN` | crates.io |
+
+A step that publishes nothing writes to the job summary saying so. A skipped
+publish that looked like a green tick would be worse than a failure, because
+nobody would go looking.
+
+crates.io was deliberately manual until it wasn't. The reasoning for keeping a
+human in the loop was that publishing cannot be undone — a version can be
+yanked but never replaced, and the name is claimed forever. That is still true,
+and it is now the reason to be careful with the version bump rather than a
+reason to publish by hand: the bump is already irreversible for GitHub releases
+and npm, so a third channel needing a separate manual step bought consistency
+for nobody and was easy to forget.
+
+Publishing an existing version is treated as success, not failure. The workflow
+asks crates.io whether the version is there before uploading, so a re-run of a
+release that got halfway does not fail on its second attempt.
 
 ### npm packaging
 
