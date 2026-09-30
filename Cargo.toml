@@ -1,6 +1,6 @@
 [package]
 name = "webmcp-conduit"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Turn any WebMCP-enabled website into a standard MCP server. No browser required."
 license = "Apache-2.0"
