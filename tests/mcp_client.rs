@@ -331,25 +331,73 @@ async fn no_response_frame_is_empty_for_a_strict_parser() {
     ])
     .await;
 
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"strict","version":"1"}}}"#;
-    let raw = post(&server.address, "/fixture", body).await;
+    // Every response in a real handshake, not just the first. The priming
+    // frame is attached when the session layer opens a request-wise stream,
+    // which `initialize` does not go through — so checking `initialize` alone
+    // passes while every later response carries the empty frame. It did, for
+    // two releases.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"strict","version":"1"}}}"#;
+    let raw = post(&server.address, "/fixture", init).await;
+    every_frame_is_parseable(&server, "initialize", &raw);
 
+    let session = session_id(&raw).unwrap_or_else(|| {
+        panic!(
+            "{}",
+            server.context(&format!("no Mcp-Session-Id on initialize: {raw}"))
+        )
+    });
+
+    let raw = post_with(
+        &server.address,
+        "/fixture",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        Some(&session),
+    )
+    .await;
+    every_frame_is_parseable(&server, "notifications/initialized", &raw);
+
+    let raw = post_with(
+        &server.address,
+        "/fixture",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        Some(&session),
+    )
+    .await;
+    every_frame_is_parseable(&server, "tools/list", &raw);
+
+    server.stop().await;
+}
+
+/// The `Mcp-Session-Id` a response issued, if it issued one.
+fn session_id(raw: &str) -> Option<String> {
+    raw.lines()
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("mcp-session-id")
+                .then(|| value.trim().to_string())
+        })
+}
+
+/// Assert that a client parsing every `data:` line as JSON survives `raw`.
+///
+/// That is the whole property. A response may be SSE or plain JSON — the spec
+/// allows both — but an empty `data:` field is neither, and it is what produced
+/// Postman's "Invalid message syntax".
+fn every_frame_is_parseable(server: &Server, label: &str, raw: &str) {
     let (headers, payload) = raw.split_once("\r\n\r\n").unwrap_or_else(|| {
         panic!(
             "{}",
-            server.context(&format!("no header/body split in: {raw}"))
+            server.context(&format!("no header/body split on {label}: {raw}"))
         )
     });
 
     assert!(
-        headers.starts_with("HTTP/1.1 200"),
-        "initialize should succeed, got: {headers}"
+        headers.starts_with("HTTP/1.1 200") || headers.starts_with("HTTP/1.1 202"),
+        "{label} should succeed, got: {headers}"
     );
 
     if headers.to_ascii_lowercase().contains("text/event-stream") {
-        // SSE is permitted by the spec, but every data field a client will
-        // parse has to be parseable. An empty one is what produced Postman's
-        // "Invalid message syntax".
         for (i, line) in payload.lines().enumerate() {
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
@@ -357,22 +405,28 @@ async fn no_response_frame_is_empty_for_a_strict_parser() {
             let data = data.trim();
             assert!(
                 !data.is_empty(),
-                "SSE frame {i} has an empty data field; a client that parses \
-                 every data line as JSON fails here before it sees a message"
+                "{label}: SSE frame {i} has an empty data field; a client that \
+                 parses every data line as JSON fails here before it sees a \
+                 message.\n\nfull response:\n{raw}"
             );
             serde_json::from_str::<serde_json::Value>(data)
-                .unwrap_or_else(|e| panic!("SSE frame {i} is not JSON ({e}): {data}"));
+                .unwrap_or_else(|e| panic!("{label}: SSE frame {i} is not JSON ({e}): {data}"));
         }
+    } else if payload.trim().is_empty() {
+        // A notification is answered with 202 and no body, which is correct
+        // and has no frame to check.
+        assert!(
+            headers.starts_with("HTTP/1.1 202"),
+            "{label}: empty body on a non-202 response: {headers}"
+        );
     } else {
         assert!(
             headers.to_ascii_lowercase().contains("application/json"),
-            "a response must be application/json or text/event-stream, got: {headers}"
+            "{label}: a response must be application/json or text/event-stream, got: {headers}"
         );
         serde_json::from_str::<serde_json::Value>(payload.trim())
-            .unwrap_or_else(|e| panic!("body is not JSON ({e}): {payload}"));
+            .unwrap_or_else(|e| panic!("{label}: body is not JSON ({e}): {payload}"));
     }
-
-    server.stop().await;
 }
 
 /// A POST written by hand, so the bytes on the wire are the bytes asserted on.
@@ -389,14 +443,28 @@ async fn no_response_frame_is_empty_for_a_strict_parser() {
 /// - every failure carries the bytes received so far. A test that fails on a
 ///   machine you cannot attach to has to explain itself in the message.
 async fn post(address: &str, path: &str, body: &str) -> String {
+    post_with(address, path, body, None).await
+}
+
+/// `post`, plus the `Mcp-Session-Id` a client echoes back after `initialize`.
+///
+/// The header matters to what is being asserted: the priming frame is attached
+/// when the session layer opens a request-wise stream, which is every request
+/// after the first. A test that only ever sends `initialize` never sees one.
+async fn post_with(address: &str, path: &str, body: &str, session: Option<&str>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut stream = connect(address).await;
 
+    let session_header = match session {
+        Some(id) => format!("Mcp-Session-Id: {id}\r\n"),
+        None => String::new(),
+    };
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\n\
          Accept: application/json, text/event-stream\r\n\
          Content-Type: application/json\r\n\
+         {session_header}\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
