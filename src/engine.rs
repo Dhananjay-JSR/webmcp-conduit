@@ -30,7 +30,6 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct Description {
     pub engine: String,
-    pub prefix: String,
     pub tool_count: usize,
 }
 
@@ -147,7 +146,6 @@ pub async fn spawn(target: String, session_id: Option<String>, no_scripts: bool)
                         Command::Describe(reply) => {
                             let _ = reply.send(Description {
                                 engine: page.engine.as_str().to_string(),
-                                prefix: page.prefix.clone(),
                                 tool_count: page.tools().len(),
                             });
                         }
