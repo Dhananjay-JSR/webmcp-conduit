@@ -8,5 +8,4 @@
 # src/js/vendor/ are what ship, and they are checked in.
 node_modules/
 vendor-build/out/
-npm/dist/
 fixtures/**/node_modules/
