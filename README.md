@@ -91,10 +91,14 @@ conduit serve https://example.com --session alice
 
 Two ids are two unrelated visitors, and neither can see the other's data.
 
-Sessions are directories of JSON under `CONDUIT_SESSION_DIR`, or the platform
-data directory. conduit has no commands for listing or deleting them: it serves
-pages, and the format is plain enough that `ls` and `rm` are the management
-tools.
+Sessions are directories under `CONDUIT_SESSION_DIR`, or the platform data
+directory, each holding one gzipped JSON document. A session is a dump of
+`localStorage` and every IndexedDB a site wrote — JSON describing JSON, which
+compresses by one to two orders of magnitude, and the deployments holding the
+most sessions are the ones least able to spend disk on whitespace.
+
+conduit has no commands for listing or deleting them: it serves pages, and the
+format is plain enough that `ls`, `zcat` and `rm` are the management tools.
 
 ### Over HTTP
 

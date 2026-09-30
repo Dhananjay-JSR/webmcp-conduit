@@ -2542,11 +2542,12 @@ dependencies = [
 
 [[package]]
 name = "webmcp-conduit"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
  "ego-tree",
+ "flate2",
  "getrandom 0.4.3",
  "http-body-util",
  "hyper",
