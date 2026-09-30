@@ -560,7 +560,18 @@ async fn connect(
                     // page, so `initialize` answers immediately rather than
                     // blocking for the tens of seconds a real page takes.
                     move || Ok(crate::server::Conduit::new(spec.clone())),
-                    Arc::new(LocalSessionManager::default()),
+                    Arc::new({
+                        // rmcp carries `sse_retry` in two places, and only one
+                        // of them is reachable from the config below. This is
+                        // the other: the session layer prepends a priming
+                        // event to every request-wise stream, and it does so
+                        // from its own default rather than the server's.
+                        // Turning off one and not the other leaves the frame
+                        // exactly where it was.
+                        let mut manager = LocalSessionManager::default();
+                        manager.session_config.sse_retry = None;
+                        manager
+                    }),
                     StreamableHttpServerConfig::default()
                         // Sessions on, so the transport issues an
                         // `Mcp-Session-Id` at initialize and clients echo it
@@ -578,20 +589,14 @@ async fn connect(
                         // exactly that. It reads as the price of session mode
                         // and is not: it comes from `sse_retry`, and turning
                         // that off keeps sessions and drops the frame.
+                        //
+                        // This setting alone does not do that. It is the
+                        // stateless path's copy, and the session manager above
+                        // carries the one that runs. Both are set because
+                        // either path is reachable by configuration, and
+                        // leaving this one at its default would make the
+                        // pairing look accidental.
                         .with_sse_retry(None)
-                        // Plain JSON responses rather than an SSE stream.
-                        //
-                        // conduit never sends anything before a response — no
-                        // sampling, no progress, no server-initiated requests —
-                        // so a stream buys nothing, and the SDK falls back to
-                        // SSE by itself if a handler ever does emit something.
-                        //
-                        // It also avoids a real interoperability problem.
-                        // Legacy session mode opens every stream with a priming
-                        // event whose data field is empty, and a client that
-                        // JSON-parses each `data:` gets `JSON.parse("")` and
-                        // reports a syntax error before it ever sees a message.
-                        // Postman's MCP client does exactly that.
                         // Host values this server answers to. The SDK defaults
                         // to loopback only, which is right for a local server
                         // and would 403 every request to a deployed one, so the
