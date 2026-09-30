@@ -26,8 +26,8 @@ no token to paste, no separate client to install.
 # curl — downloads the release binary for your platform
 curl -fsSL https://raw.githubusercontent.com/Dhananjay-JSR/webmcp-conduit/main/install.sh | sh
 
-# from source
-cargo install --git https://github.com/Dhananjay-JSR/webmcp-conduit
+# cargo
+cargo install webmcp-conduit
 ```
 
 One static binary. No Node, no Chromium.
