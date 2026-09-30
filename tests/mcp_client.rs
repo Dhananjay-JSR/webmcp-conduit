@@ -84,6 +84,108 @@ async fn serve_fixture() -> String {
     format!("http://{addr}/")
 }
 
+/// A conduit server under test: the process, the address it bound, and
+/// everything it has said on stderr.
+///
+/// This exists because two CI failures were undiagnosable. One reported
+/// `reading the response` and nothing else; the other reported
+/// `Connection refused` on a port conduit had just announced. In both cases the
+/// server's own output — the thing that would have explained it — was being
+/// read for one line and then discarded.
+///
+/// So stderr is kept, and every failure prints it alongside whether the process
+/// is still alive.
+struct Server {
+    child: tokio::process::Child,
+    address: String,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Server {
+    async fn start(args: &[&str]) -> Self {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_conduit"))
+            .args(args)
+            .env(
+                "CONDUIT_SESSION_DIR",
+                std::env::temp_dir().join("conduit-test-sessions"),
+            )
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawning conduit");
+
+        let stderr = child.stderr.take().expect("conduit stderr");
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (found, address) = tokio::sync::oneshot::channel();
+
+        // Drains for the life of the process rather than stopping at the
+        // address line, so the log is complete when something goes wrong later.
+        {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                let mut found = Some(found);
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(rest) = line.strip_prefix("conduit: listening on http://") {
+                        if let Some(tx) = found.take() {
+                            let _ = tx.send(rest.trim().to_string());
+                        }
+                    }
+                    log.lock().expect("log mutex").push(line);
+                }
+            });
+        }
+
+        let address = match tokio::time::timeout(Duration::from_secs(60), address).await {
+            Ok(Ok(address)) => address,
+            _ => {
+                let log = log.lock().expect("log mutex").join("\n");
+                let status = child.try_wait().ok().flatten();
+                panic!("conduit never reported an address (exit: {status:?})\nstderr:\n{log}");
+            }
+        };
+
+        let server = Self {
+            child,
+            address,
+            log,
+        };
+        server.wait_until_accepting().await;
+        server
+    }
+
+    /// Announcing a port and accepting on it are not the same instant, and a
+    /// loaded runner can refuse a connection in between. Retrying here turns
+    /// that into a pause rather than a failed test — and if the server really
+    /// is gone, says so with its output instead of `Connection refused`.
+    async fn wait_until_accepting(&self) {
+        for attempt in 0..100 {
+            if tokio::net::TcpStream::connect(&self.address).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20 * (attempt / 10 + 1))).await;
+        }
+        panic!(
+            "conduit announced {} but never accepted a connection\nstderr:\n{}",
+            self.address,
+            self.report()
+        );
+    }
+
+    fn report(&self) -> String {
+        self.log.lock().expect("log mutex").join("\n")
+    }
+
+    /// Wraps a failure with the server's output, so a broken run explains
+    /// itself without anyone re-running it to watch.
+    fn context(&self, what: &str) -> String {
+        format!("{what}\n\nconduit said:\n{}", self.report())
+    }
+
+    async fn stop(mut self) {
+        let _ = self.child.kill().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_mcp_client_can_drive_a_page_over_stdio() {
     let fixture = fixture_path();
@@ -146,40 +248,32 @@ async fn an_mcp_client_can_drive_a_page_over_stdio() {
 async fn an_mcp_client_can_drive_a_page_over_http() {
     let site = serve_fixture().await;
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_conduit"))
-        .args([
-            "serve",
-            "--transport",
-            "http",
-            // Port 0: the OS picks, and conduit reports what it got. A fixed
-            // port would make two test runs on one machine flaky.
-            "--bind",
-            "127.0.0.1:0",
-            "--site",
-            &format!("fixture={site}"),
-            // No session, so the test leaves nothing behind on disk.
-            "--stateless",
-        ])
-        .env(
-            "CONDUIT_SESSION_DIR",
-            std::env::temp_dir().join("conduit-test-sessions"),
-        )
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawning conduit over http");
-
-    let stderr = child.stderr.take().expect("conduit stderr");
-    let address = tokio::time::timeout(Duration::from_secs(30), read_address(stderr))
-        .await
-        .expect("conduit should report its address")
-        .expect("conduit should report its address");
+    // Port 0: the OS picks and conduit reports what it got. A fixed port would
+    // make two runs on one machine flaky. `--stateless` so nothing is left on
+    // disk.
+    let server = Server::start(&[
+        "serve",
+        "--transport",
+        "http",
+        "--bind",
+        "127.0.0.1:0",
+        "--site",
+        &format!("fixture={site}"),
+        "--stateless",
+    ])
+    .await;
+    let address = &server.address;
 
     let transport = StreamableHttpClientTransport::from_uri(format!("http://{address}/fixture"));
-    let client = ().serve(transport).await.expect(
-        "the client should complete the MCP handshake over Streamable HTTP. \
-         A failure here is an interoperability bug, not a conduit bug: the \
-         server answered, but not in a way a client library accepts.",
-    );
+    let client = ().serve(transport).await.unwrap_or_else(|e| {
+        panic!(
+            "{}",
+            server.context(&format!(
+                "the client should complete the MCP handshake over Streamable \
+                 HTTP, but got: {e}"
+            ))
+        )
+    });
 
     let info = client
         .peer_info()
@@ -210,7 +304,7 @@ async fn an_mcp_client_can_drive_a_page_over_http() {
     assert_eq!(text_of(&result), "hello grace");
 
     client.cancel().await.expect("shutting the client down");
-    let _ = child.kill().await;
+    server.stop().await;
 }
 
 /// What a strict client sees on the wire.
@@ -227,37 +321,27 @@ async fn an_mcp_client_can_drive_a_page_over_http() {
 async fn no_response_frame_is_empty_for_a_strict_parser() {
     let site = serve_fixture().await;
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_conduit"))
-        .args([
-            "serve",
-            "--transport",
-            "http",
-            "--bind",
-            "127.0.0.1:0",
-            "--site",
-            &format!("fixture={site}"),
-            "--stateless",
-        ])
-        .env(
-            "CONDUIT_SESSION_DIR",
-            std::env::temp_dir().join("conduit-test-sessions"),
-        )
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawning conduit over http");
-
-    let stderr = child.stderr.take().expect("conduit stderr");
-    let address = tokio::time::timeout(Duration::from_secs(30), read_address(stderr))
-        .await
-        .expect("conduit should report its address")
-        .expect("conduit should report its address");
+    let server = Server::start(&[
+        "serve",
+        "--transport",
+        "http",
+        "--bind",
+        "127.0.0.1:0",
+        "--site",
+        &format!("fixture={site}"),
+        "--stateless",
+    ])
+    .await;
 
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"strict","version":"1"}}}"#;
-    let raw = post(&address, "/fixture", body).await;
+    let raw = post(&server.address, "/fixture", body).await;
 
-    let (headers, payload) = raw
-        .split_once("\r\n\r\n")
-        .unwrap_or_else(|| panic!("no header/body split in: {raw}"));
+    let (headers, payload) = raw.split_once("\r\n\r\n").unwrap_or_else(|| {
+        panic!(
+            "{}",
+            server.context(&format!("no header/body split in: {raw}"))
+        )
+    });
 
     assert!(
         headers.starts_with("HTTP/1.1 200"),
@@ -290,7 +374,7 @@ async fn no_response_frame_is_empty_for_a_strict_parser() {
             .unwrap_or_else(|e| panic!("body is not JSON ({e}): {payload}"));
     }
 
-    let _ = child.kill().await;
+    server.stop().await;
 }
 
 /// A POST written by hand, so the bytes on the wire are the bytes asserted on.
@@ -403,18 +487,6 @@ async fn connect(address: &str) -> tokio::net::TcpStream {
         }
     }
     panic!("could not connect to conduit at {address}: {last:?}");
-}
-
-/// Wait for the line conduit prints once it is listening, and take the address
-/// from it. Polling the port instead would race the bind.
-async fn read_address(stderr: tokio::process::ChildStderr) -> Option<String> {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Some(rest) = line.strip_prefix("conduit: listening on http://") {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
 }
 
 fn names(tools: &[rmcp::model::Tool]) -> Vec<String> {
