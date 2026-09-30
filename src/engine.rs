@@ -219,9 +219,13 @@ pub fn commit(handle: Option<&mut session::Handle>, page: &mut mcp::Session) {
 
 /// Live engines, keyed by what makes them distinct: the page and the session
 /// looking at it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Pool {
     engines: Arc<Mutex<HashMap<String, Entry>>>,
+    /// The ceiling. Each engine is a thread and a JavaScript heap, so this is
+    /// what makes the server's memory a number you can reason about rather than
+    /// a function of how many people turned up.
+    max_engines: usize,
 }
 
 #[derive(Clone)]
@@ -230,9 +234,17 @@ struct Entry {
     last_used: Instant,
 }
 
+/// Enough for a busy demo, small enough that a modest container survives a
+/// crowd. Each engine holds a page: tens of megabytes of JavaScript heap, plus
+/// a thread.
+pub const DEFAULT_MAX_ENGINES: usize = 16;
+
 impl Pool {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(max_engines: usize) -> Self {
+        Self {
+            engines: Arc::new(Mutex::new(HashMap::new())),
+            max_engines: max_engines.max(1),
+        }
     }
 
     pub fn key(target: &str, session_id: Option<&str>) -> String {
@@ -240,13 +252,21 @@ impl Pool {
     }
 
     /// Find a live engine for this page, or start one.
+    /// `identity` decides which engine this is — a shared secret, or a value
+    /// unique to one connection. `persist` decides whether it writes to disk,
+    /// and is `None` for a connection that asked for no session.
+    ///
+    /// They are separate because an engine nobody shares still has to be in the
+    /// pool: the pool is what bounds them, and an engine outside it is an
+    /// engine nothing can reclaim.
     pub async fn get_or_spawn(
         &self,
         target: &str,
-        session_id: Option<&str>,
+        identity: &str,
+        persist: Option<&str>,
         no_scripts: bool,
     ) -> Result<Handle> {
-        let key = Self::key(target, session_id);
+        let key = Self::key(target, Some(identity));
 
         {
             let mut engines = self.engines.lock().await;
@@ -262,14 +282,34 @@ impl Pool {
             }
         }
 
-        let handle = spawn(
-            target.to_string(),
-            session_id.map(str::to_string),
-            no_scripts,
-        )
-        .await?;
+        let handle = spawn(target.to_string(), persist.map(str::to_string), no_scripts).await?;
 
         let mut engines = self.engines.lock().await;
+
+        // Make room before inserting. Without a ceiling the only bound is the
+        // idle timer, which is the wrong shape: with a handful of callers it
+        // holds engines nobody wants, and with hundreds it runs out of memory
+        // long before the timer fires.
+        //
+        // Evicting drops the handle, which closes the worker's channel, which
+        // makes it commit its session and exit. Nothing is lost — the next
+        // request for that page reloads it.
+        while engines.len() >= self.max_engines {
+            let Some(oldest) = engines
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            tracing::info!(
+                target: "conduit",
+                "at {} engines; evicting the least recently used: {oldest}",
+                self.max_engines
+            );
+            engines.remove(&oldest);
+        }
+
         engines.insert(
             key,
             Entry {

@@ -63,6 +63,8 @@ pub struct Config {
     /// Extra `Host` values this server answers to, beyond loopback.
     pub allow_hosts: Vec<String>,
     pub no_scripts: bool,
+    /// How many pages may be held in memory at once.
+    pub max_engines: usize,
 }
 
 /// Paths that are the server's own, so a site may not take them.
@@ -285,7 +287,7 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
 
-    let pool = engine::Pool::new();
+    let pool = engine::Pool::new(config.max_engines);
     pool.start_reaper();
     let services: Services = Arc::new(Mutex::new(HashMap::new()));
     let config = Arc::new(config);
@@ -624,6 +626,7 @@ mod tests {
             allow_origins: Vec::new(),
             allow_hosts: Vec::new(),
             no_scripts: false,
+            max_engines: crate::engine::DEFAULT_MAX_ENGINES,
         }
     }
 

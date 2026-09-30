@@ -45,13 +45,27 @@ pub struct EngineSpec {
 #[derive(Clone)]
 pub struct Conduit {
     spec: EngineSpec,
+    /// Which engine this handler owns.
+    ///
+    /// A shared secret when the caller supplied one, and otherwise a random
+    /// value unique to this connection. Either way it is a pool key, which is
+    /// what lets the pool bound every engine rather than only the shared ones —
+    /// an engine outside the pool is an engine nothing can reclaim, and an MCP
+    /// session has no idle timeout, so a client that disconnects without a
+    /// DELETE would leak one forever.
+    identity: Arc<str>,
     engine: Arc<tokio::sync::OnceCell<engine::Handle>>,
 }
 
 impl Conduit {
     pub fn new(spec: EngineSpec) -> Self {
+        let identity = match &spec.session {
+            Some(session) => session.clone(),
+            None => Arc::from(random_identity().as_str()),
+        };
         Self {
             spec,
+            identity,
             engine: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
@@ -65,6 +79,7 @@ impl Conduit {
         let cell = tokio::sync::OnceCell::new();
         cell.set(handle).ok();
         Self {
+            identity: Arc::from("stdio"),
             spec: EngineSpec {
                 url: Arc::from(url),
                 session: None,
@@ -84,26 +99,37 @@ impl Conduit {
     async fn engine(&self) -> Result<&engine::Handle, ErrorData> {
         self.engine
             .get_or_try_init(|| async {
-                match &self.spec.session {
-                    // Pooled and persistent: the secret is the identity, and
-                    // anyone else presenting it joins the same engine.
-                    Some(session) => {
-                        self.spec
-                            .pool
-                            .get_or_spawn(&self.spec.url, Some(session), self.spec.no_scripts)
-                            .await
-                    }
-                    // Private to this connection. Not pooled, so nobody else
-                    // can reach it, and no session means nothing is written to
-                    // disk.
-                    None => {
-                        engine::spawn(self.spec.url.to_string(), None, self.spec.no_scripts).await
-                    }
-                }
+                self.spec
+                    .pool
+                    .get_or_spawn(
+                        &self.spec.url,
+                        &self.identity,
+                        // Only a caller-supplied session persists. A private
+                        // engine writes nothing: it exists for one connection
+                        // and there is nobody to restore it for.
+                        self.spec.session.as_deref(),
+                        self.spec.no_scripts,
+                    )
+                    .await
             })
             .await
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))
     }
+}
+
+/// A value no other connection will hold. 128 bits from the OS, because a
+/// collision would put two callers on one page — the thing this exists to
+/// prevent.
+fn random_identity() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        // Falling back to a counter rather than a constant: a predictable
+        // identity is survivable, a shared one is not.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        bytes[..8].copy_from_slice(&n.to_le_bytes());
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// An engine that has stopped is an internal failure, not a bad request: the

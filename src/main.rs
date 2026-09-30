@@ -124,6 +124,14 @@ enum Command {
         /// local development; never for a deployment reachable by anyone else.
         #[arg(long)]
         allow_private_sites: bool,
+        /// How many pages to hold in memory at once. Beyond this the least
+        /// recently used is retired, committing its session on the way out.
+        ///
+        /// Each one is a thread and a JavaScript heap, so this is what makes
+        /// the server's memory a number you can reason about rather than a
+        /// function of how many people turned up.
+        #[arg(long, default_value_t = engine::DEFAULT_MAX_ENGINES)]
+        max_engines: usize,
     },
 }
 
@@ -198,6 +206,7 @@ async fn run() -> Result<()> {
             allow_hosts,
             allow_any_site,
             allow_private_sites,
+            max_engines,
         } => match transport {
             Transport::Stdio => {
                 // The misplaced flag is checked before the missing argument:
@@ -267,6 +276,7 @@ async fn run() -> Result<()> {
                         sites,
                         allow_any_site,
                         allow_private_sites,
+                        max_engines,
                         allow_origins,
                         allow_hosts,
                         no_scripts,
@@ -336,7 +346,7 @@ async fn serve_stdio(target: &str, session_id: Option<String>, no_scripts: bool)
         }
     );
 
-    let service = server::Conduit::ready(handle, target, engine::Pool::new());
+    let service = server::Conduit::ready(handle, target, engine::Pool::new(1));
     let running = rmcp::serve_server(service, rmcp::transport::io::stdio())
         .await
         .map_err(|e| anyhow::anyhow!("starting the MCP server: {e}"))?;
