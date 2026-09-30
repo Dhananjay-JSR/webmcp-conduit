@@ -45,6 +45,91 @@ jobs:
   # A release builds from whatever Cargo.toml says, so a version that does
   # not parse or a manifest that will not package should fail here rather
   # than halfway through tagging.
+  # Two answers instead of one.
+  #
+  # `cargo test` passing says "everything is fine" and `cargo test` failing says
+  # "something is wrong", and those are not the same question. A PR that breaks
+  # behaviour which already worked is a regression, and one whose own new tests
+  # fail is unfinished work. They deserve different reactions, and a single red
+  # tick makes you open the log to tell them apart.
+  split:
+    name: regressions vs new tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit has to be reachable to diff against it.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile the tests
+        run: cargo test --no-run
+
+      - name: Work out which tests are new
+        id: split
+        # bash explicitly, on every step below that builds an argument list in a
+        # variable. Unquoted expansion splitting into separate arguments is a
+        # bash behaviour, not a universal one — zsh does not do it, and the same
+        # script there silently passes one giant argument that matches nothing,
+        # so every test looks filtered out and both halves report success.
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+
+          # Every test the suite knows about, by full path.
+          cargo test -- --list 2>/dev/null \
+            | grep ': test$' | sed 's/: test$//' | sort -u > all.txt
+
+          # Function names this PR adds. Non-test functions come along too, and
+          # are dropped by the intersection below — a name only counts as a new
+          # test if libtest also reports it as one.
+          git diff "$base"...HEAD -- '*.rs' \
+            | grep -E '^\+\s*(async )?fn ' \
+            | sed -E 's/.*fn ([a-zA-Z0-9_]+).*/\1/' \
+            | sort -u > added.txt
+
+          : > new.txt
+          while read -r test; do
+            grep -qx "${test##*::}" added.txt && echo "$test" >> new.txt
+          done < all.txt
+
+          echo "total:    $(wc -l < all.txt | tr -d ' ')"
+          echo "new:      $(wc -l < new.txt | tr -d ' ')"
+          sed 's/^/  + /' new.txt
+
+      - name: Existing tests must still pass
+        shell: bash
+        run: |
+          # Everything except what this PR introduced. A failure here is a
+          # regression: it worked before the PR and does not now.
+          skips=""
+          while read -r test; do
+            skips="$skips --skip $test"
+          done < new.txt
+
+          # shellcheck disable=SC2086
+          cargo test -- $skips
+
+      - name: New tests must pass
+        shell: bash
+        run: |
+          if [ ! -s new.txt ]; then
+            echo "This PR adds no tests."
+            {
+              echo "### No new tests"
+              echo ""
+              echo "Nothing here fails because of it — but a change worth making"
+              echo "is usually a change worth pinning."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # shellcheck disable=SC2046
+          cargo test -- --exact $(tr '\n' ' ' < new.txt)
+
+
   packaging:
     name: crates.io packaging
     runs-on: ubuntu-latest
