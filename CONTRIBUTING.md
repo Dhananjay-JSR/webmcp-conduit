@@ -115,8 +115,8 @@ it first.
 ## Releasing
 
 A release is cut by **the version in `Cargo.toml` changing on main**. Bump it,
-merge, and the rest follows — tag, binaries, checksums, GitHub release, npm
-packages, and the crate on crates.io.
+merge, and the rest follows — tag, binaries, checksums, GitHub release, and the
+crate on crates.io.
 
 ```bash
 # in a PR
@@ -156,14 +156,17 @@ is a repository setting rather than anything in these files.
 
 ### Publishing
 
-Two registries, both published by the same version bump, and both skipped with
-a warning rather than a failure when their token is missing — a release should
-not fail because one channel is unconfigured.
+Publishing happens on the same version bump, and is skipped with a warning
+rather than a failure when the token is missing — a release should not fail
+because a channel is unconfigured.
 
 | secret | registry |
 | --- | --- |
-| `NPM_TOKEN` | npm |
 | `CARGO_REGISTRY_TOKEN` | crates.io |
+
+npm is not published to. The packaging existed and worked, but the token never
+arrived, so every release advertised an install path that did not exist. It was
+removed rather than left half-built — `git log` has it when it is wanted back.
 
 A step that publishes nothing writes to the job summary saying so. A skipped
 publish that looked like a green tick would be worse than a failure, because
@@ -173,30 +176,10 @@ crates.io was deliberately manual until it wasn't. The reasoning for keeping a
 human in the loop was that publishing cannot be undone — a version can be
 yanked but never replaced, and the name is claimed forever. That is still true,
 and it is now the reason to be careful with the version bump rather than a
-reason to publish by hand: the bump is already irreversible for GitHub releases
-and npm, so a third channel needing a separate manual step bought consistency
-for nobody and was easy to forget.
+reason to publish by hand: the bump is already irreversible for the GitHub
+release, so a second channel needing its own manual step bought consistency for
+nobody and was easy to forget.
 
 Publishing an existing version is treated as success, not failure. The workflow
 asks crates.io whether the version is there before uploading, so a re-run of a
 release that got halfway does not fail on its second attempt.
-
-### npm packaging
-
-The binaries also ship through npm, because MCP servers are installed with
-`npx` far more often than with cargo. The layout is the one esbuild and swc
-use: a wrapper package that lists per-platform packages as
-`optionalDependencies`, each carrying `os` and `cpu`. npm installs only the one
-matching the machine, and downloads nothing at install time.
-
-`npm/build.mjs` assembles them from the release binaries. To try it locally:
-
-```bash
-cargo build --release
-mkdir -p /tmp/bins/aarch64-apple-darwin
-cp target/release/conduit /tmp/bins/aarch64-apple-darwin/
-node npm/build.mjs 0.0.0-test /tmp/bins
-```
-
-Publishing needs an `NPM_TOKEN` repository secret. Without it the release still
-completes and the step warns instead of failing.
