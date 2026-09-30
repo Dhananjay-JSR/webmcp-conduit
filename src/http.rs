@@ -490,6 +490,55 @@ async fn route(
 /// difference between diagnosing an interoperability problem and guessing at
 /// it. `StreamableHttpService` is generic over the body type, so it takes the
 /// buffered request unchanged.
+/// Drop an `MCP-Protocol-Version` header that advertises a version newer than
+/// anything we negotiate, on a request that already belongs to a session.
+///
+/// rmcp contradicts itself here. Its handler says a session that negotiated
+/// through `initialize` "keeps the session model and may omit per-request
+/// metadata", but the transport decides whether to demand that metadata by
+/// looking only at this header — never at whether a session exists. So a
+/// client that advertises 2026-07-28 in the header while negotiating an older
+/// version gets every request after `initialize` rejected:
+///
+///   Invalid params: request _meta is missing or has malformed required
+///   fields: io.modelcontextprotocol/protocolVersion, .../clientCapabilities
+///
+/// Claude Code does exactly this, and so does Postman. Two clients is no
+/// longer an argument about who is right.
+///
+/// Only requests carrying `Mcp-Session-Id` are touched, which is precisely the
+/// case rmcp's own comment says is exempt. `initialize` has no session id yet,
+/// so it keeps its header and negotiation is unaffected, and a version we do
+/// negotiate is left alone so real mismatches are still caught.
+fn relax_future_protocol_header(req: &mut Request<Full<Bytes>>) {
+    const NEWEST_NEGOTIATED: &str = "2025-11-25";
+
+    if req.headers().get("mcp-session-id").is_none() {
+        return;
+    }
+
+    let advertised = req
+        .headers()
+        .get("mcp-protocol-version")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let Some(advertised) = advertised else {
+        return;
+    };
+    // Dates, so string order is chronological order.
+    if advertised.as_str() <= NEWEST_NEGOTIATED {
+        return;
+    }
+
+    tracing::debug!(
+        target: "http",
+        "dropping MCP-Protocol-Version: {advertised} on a session request; \
+         rmcp would demand inline _meta the client has no reason to send"
+    );
+    req.headers_mut().remove("mcp-protocol-version");
+}
+
 async fn buffer(req: Request<hyper::body::Incoming>) -> Result<Request<Full<Bytes>>> {
     let (parts, body) = req.into_parts();
     let bytes = body.collect().await?.to_bytes();
@@ -617,8 +666,11 @@ async fn connect(
         }
     };
 
+    let mut req = buffer(req).await?;
+    relax_future_protocol_header(&mut req);
+
     let response = service
-        .call(buffer(req).await?)
+        .call(req)
         .await
         .map_err(|e| anyhow!("streamable http transport: {e}"))?;
 
@@ -679,6 +731,59 @@ mod tests {
         assert!(refuse("gopher://example.com/"));
 
         assert!(validate_target("https://example.com/app", &open()).is_ok());
+    }
+
+    fn request_with(session: Option<&str>, version: Option<&str>) -> Request<Full<Bytes>> {
+        let mut builder = Request::builder().method(Method::POST).uri("/pizza");
+        if let Some(session) = session {
+            builder = builder.header("Mcp-Session-Id", session);
+        }
+        if let Some(version) = version {
+            builder = builder.header("MCP-Protocol-Version", version);
+        }
+        builder.body(Full::new(Bytes::new())).unwrap()
+    }
+
+    #[test]
+    fn a_future_protocol_header_is_dropped_on_session_requests() {
+        // What Claude Code sends: a session id, and a header advertising a
+        // version newer than anything we negotiate. rmcp answers that with
+        // "request _meta is missing", and the client reports a broken server.
+        let mut req = request_with(Some("abc"), Some("2026-07-28"));
+        relax_future_protocol_header(&mut req);
+        assert!(
+            req.headers().get("mcp-protocol-version").is_none(),
+            "the header rmcp chokes on should be gone"
+        );
+    }
+
+    #[test]
+    fn a_version_we_negotiate_is_left_alone() {
+        for version in ["2025-06-18", "2025-11-25"] {
+            let mut req = request_with(Some("abc"), Some(version));
+            relax_future_protocol_header(&mut req);
+            assert_eq!(
+                req.headers()
+                    .get("mcp-protocol-version")
+                    .and_then(|v| v.to_str().ok()),
+                Some(version),
+                "{version} is negotiable, so a real mismatch must still be caught"
+            );
+        }
+    }
+
+    #[test]
+    fn initialize_keeps_its_header() {
+        // No session id yet, so this is `initialize` — the request that does
+        // the negotiating. Stripping its header would change what we agree to.
+        let mut req = request_with(None, Some("2026-07-28"));
+        relax_future_protocol_header(&mut req);
+        assert_eq!(
+            req.headers()
+                .get("mcp-protocol-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("2026-07-28")
+        );
     }
 
     #[test]
