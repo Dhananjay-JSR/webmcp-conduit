@@ -109,21 +109,6 @@ enum Command {
         /// deployed server rejects every request. Repeatable.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
-        /// Serve `/connect?url=<site>[&session=<secret>]`, letting a caller
-        /// name the page instead of the operator.
-        ///
-        /// Off by default: a server that fetches whatever URL it is handed is
-        /// a server-side request forgery engine. Private and loopback targets
-        /// are refused even when this is on.
-        ///
-        /// A `session` here is a credential rather than a name — whoever knows
-        /// it gets whatever it is signed into — so it should be random.
-        #[arg(long)]
-        allow_any_site: bool,
-        /// Permit loopback and private addresses as `/connect` targets. For
-        /// local development; never for a deployment reachable by anyone else.
-        #[arg(long)]
-        allow_private_sites: bool,
         /// How many pages to hold in memory at once. Beyond this the least
         /// recently used is retired, committing its session on the way out.
         ///
@@ -204,8 +189,6 @@ async fn run() -> Result<()> {
             bind,
             allow_origins,
             allow_hosts,
-            allow_any_site,
-            allow_private_sites,
             max_engines,
         } => match transport {
             Transport::Stdio => {
@@ -274,8 +257,6 @@ async fn run() -> Result<()> {
                     addr,
                     http::Config {
                         sites,
-                        allow_any_site,
-                        allow_private_sites,
                         max_engines,
                         allow_origins,
                         allow_hosts,
