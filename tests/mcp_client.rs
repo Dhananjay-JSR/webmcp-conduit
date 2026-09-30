@@ -259,7 +259,6 @@ async fn an_mcp_client_can_drive_a_page_over_http() {
         "127.0.0.1:0",
         "--site",
         &format!("fixture={site}"),
-        "--stateless",
     ])
     .await;
     let address = &server.address;
@@ -329,7 +328,6 @@ async fn no_response_frame_is_empty_for_a_strict_parser() {
         "127.0.0.1:0",
         "--site",
         &format!("fixture={site}"),
-        "--stateless",
     ])
     .await;
 

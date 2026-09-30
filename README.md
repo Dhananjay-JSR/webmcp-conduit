@@ -99,22 +99,57 @@ tools.
 ### Over HTTP
 
 Served sites are declared up front. A caller picks which site to talk to, never
-which URL to fetch and never which session to speak for — so the server is not
-an open proxy, and nobody can borrow someone else's signed-in state by naming
-it. Mounting one site twice gives it two independent profiles:
+which URL to fetch, so the server is not an open proxy.
 
 ```
-conduit serve --transport http \
-  --site alice=https://example.com \
-  --site bob=https://example.com
+conduit serve --transport http --site notes=https://example.com
 ```
 
 ```
-POST /alice     MCP, as alice
-POST /bob       MCP, as bob
-GET  /          {"sites":["alice","bob"]}
+POST /notes     MCP
+GET  /          {"sites":["notes"]}
 GET  /healthz
 ```
+
+**Each MCP connection gets its own page.** Two clients talking to the same site
+do not see each other's cookies or storage, and nothing is written to disk —
+the page is dropped when the connection ends. That isolation comes from the
+transport: the protocol issues a session id at `initialize` and clients return
+it, so conduit knows which connection a request belongs to without the caller
+arranging anything.
+
+To keep state across connections, name a session:
+
+```
+POST /notes?session=<secret>
+```
+
+Cookies, `localStorage` and IndexedDB then persist, and any caller presenting
+the same value joins the same page. It is a **credential rather than a name**:
+whoever knows it gets whatever it is signed into, so it should be random.
+`alice` means the first person to try `alice` is alice.
+
+### Letting a caller name the page
+
+Off unless asked for:
+
+```
+conduit serve --transport http --allow-any-site --site notes=https://example.com
+POST /connect?url=https%3A%2F%2Fexample.com%2Fapp
+```
+
+The engine will load a page it was not configured with, which is a capability
+and not a permission: it refuses `file://`, loopback, private networks,
+link-local — `169.254.169.254` included — and anything that is not http or
+https. What it does not do is decide *who* may ask, or which sites are
+reasonable. That belongs to whatever is in front of it, along with
+authentication and rate limiting, because the engine has no idea who you are
+and should not acquire one.
+
+Pages are held in memory and the least recently used is retired beyond
+`--max-engines` (16 by default), which puts a ceiling on memory rather than
+letting it follow how many people turned up. Retiring writes a named session
+back first, so nothing is lost — the next request reloads the page.
 
 ## How it works
 

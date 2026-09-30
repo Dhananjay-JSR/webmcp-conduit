@@ -98,9 +98,6 @@ enum Command {
         /// Address to bind.
         #[arg(long, default_value = "127.0.0.1:8080")]
         bind: String,
-        /// Keep nothing between requests: no cookies, no storage.
-        #[arg(long)]
-        stateless: bool,
         /// Browser origins permitted to call this server, e.g.
         /// `https://app.example.com`. Empty means none, which is right when the
         /// clients are MCP hosts rather than web pages. The MCP spec requires
@@ -112,6 +109,29 @@ enum Command {
         /// deployed server rejects every request. Repeatable.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
+        /// Serve `/connect?url=<site>[&session=<secret>]`, letting a caller
+        /// name the page instead of the operator.
+        ///
+        /// Off by default: a server that fetches whatever URL it is handed is
+        /// a server-side request forgery engine. Private and loopback targets
+        /// are refused even when this is on.
+        ///
+        /// A `session` here is a credential rather than a name — whoever knows
+        /// it gets whatever it is signed into — so it should be random.
+        #[arg(long)]
+        allow_any_site: bool,
+        /// Permit loopback and private addresses as `/connect` targets. For
+        /// local development; never for a deployment reachable by anyone else.
+        #[arg(long)]
+        allow_private_sites: bool,
+        /// How many pages to hold in memory at once. Beyond this the least
+        /// recently used is retired, committing its session on the way out.
+        ///
+        /// Each one is a thread and a JavaScript heap, so this is what makes
+        /// the server's memory a number you can reason about rather than a
+        /// function of how many people turned up.
+        #[arg(long, default_value_t = engine::DEFAULT_MAX_ENGINES)]
+        max_engines: usize,
     },
 }
 
@@ -182,9 +202,11 @@ async fn run() -> Result<()> {
             session: session_id,
             sites,
             bind,
-            stateless,
             allow_origins,
             allow_hosts,
+            allow_any_site,
+            allow_private_sites,
+            max_engines,
         } => match transport {
             Transport::Stdio => {
                 // The misplaced flag is checked before the missing argument:
@@ -196,9 +218,6 @@ async fn run() -> Result<()> {
                 // who passed it believes it took effect.
                 if !sites.is_empty() {
                     anyhow::bail!("`--site` belongs to `--transport http`; over stdio the page is the argument");
-                }
-                if stateless {
-                    anyhow::bail!("`--stateless` belongs to `--transport http`; over stdio, omit `--session` instead");
                 }
                 if !allow_origins.is_empty() {
                     anyhow::bail!(
@@ -255,10 +274,12 @@ async fn run() -> Result<()> {
                     addr,
                     http::Config {
                         sites,
+                        allow_any_site,
+                        allow_private_sites,
+                        max_engines,
                         allow_origins,
                         allow_hosts,
                         no_scripts,
-                        stateless,
                     },
                 )
                 .await?;
@@ -325,7 +346,7 @@ async fn serve_stdio(target: &str, session_id: Option<String>, no_scripts: bool)
         }
     );
 
-    let service = server::Conduit::new(handle, target).await;
+    let service = server::Conduit::ready(handle, target, engine::Pool::new(1));
     let running = rmcp::serve_server(service, rmcp::transport::io::stdio())
         .await
         .map_err(|e| anyhow::anyhow!("starting the MCP server: {e}"))?;
