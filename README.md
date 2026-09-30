@@ -23,17 +23,8 @@ no token to paste, no separate client to install.
 ## Install
 
 ```bash
-npx webmcp-conduit probe https://example.com
-```
-
-Or install it:
-
-```bash
-# curl
+# curl — downloads the release binary for your platform
 curl -fsSL https://raw.githubusercontent.com/Dhananjay-JSR/webmcp-conduit/main/install.sh | sh
-
-# npm
-npm install -g webmcp-conduit
 
 # from source
 cargo install --git https://github.com/Dhananjay-JSR/webmcp-conduit
@@ -66,8 +57,8 @@ as a child process and talks to it over stdin and stdout.
 {
   "mcpServers": {
     "example": {
-      "command": "npx",
-      "args": ["-y", "webmcp-conduit", "serve", "https://example.com"]
+      "command": "conduit",
+      "args": ["serve", "https://example.com"]
     }
   }
 }
