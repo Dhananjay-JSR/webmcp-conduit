@@ -7,18 +7,31 @@
 //! impossible, and that is the ordinary case for an agent driving a site on
 //! behalf of more than one person.
 //!
-//! State lives in a plain directory of JSON, one directory per session, under
-//! the platform's data directory, overridable with `CONDUIT_SESSION_DIR`.
+//! State lives in one directory per session under the platform's data
+//! directory, overridable with `CONDUIT_SESSION_DIR`. Each holds a single
+//! gzipped JSON document, `state.json.gz`.
+//!
+//! It is compressed because of what it holds. A session is a dump of
+//! `localStorage` and every IndexedDB a site wrote, which is JSON describing
+//! JSON — long repeated keys, base64 payloads, structured-clone envelopes
+//! around small values. It is the most compressible thing conduit produces,
+//! and the deployments that accumulate the most sessions are the ones least
+//! able to spend disk on whitespace.
 //!
 //! There is deliberately no management surface here — no listing, no deletion.
 //! conduit serves pages; what a fleet of sessions looks like and when one should
-//! be discarded are questions for whatever operates it. The format is plain
-//! JSON in named directories precisely so that answering them needs nothing
-//! from conduit: `ls`, `cat` and `rm` are the API.
+//! be discarded are questions for whatever operates it. Gzip is chosen over a
+//! denser codec to keep that true: `ls` and `rm` are unaffected, and `cat`
+//! becomes `zcat`, which is everywhere. Nothing needs conduit to read a
+//! session.
 
 use anyhow::{anyhow, Context, Result};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 /// Bumped when the on-disk shape changes incompatibly. An older conduit meeting
@@ -102,15 +115,30 @@ impl Store {
     /// not an error; it is how every session starts.
     pub fn load(&self, id: &str) -> Result<State> {
         let path = self.path_for(id)?;
-        if !path.exists() {
+        let legacy = self.legacy_path_for(id)?;
+
+        // A session written before sessions were compressed is still a session.
+        // It is read as it is, and the next save replaces it — no migration
+        // step, no version to bump, nothing for an operator to run.
+        let (path, raw) = if path.exists() {
+            let file = std::fs::File::open(&path)
+                .with_context(|| format!("reading session from {}", path.display()))?;
+            let mut raw = String::new();
+            GzDecoder::new(file)
+                .read_to_string(&mut raw)
+                .with_context(|| format!("decompressing session at {}", path.display()))?;
+            (path, raw)
+        } else if legacy.exists() {
+            let raw = std::fs::read_to_string(&legacy)
+                .with_context(|| format!("reading session from {}", legacy.display()))?;
+            (legacy, raw)
+        } else {
             return Ok(State {
                 version: FORMAT_VERSION,
                 ..Default::default()
             });
-        }
+        };
 
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading session from {}", path.display()))?;
         let state: State = serde_json::from_str(&raw)
             .with_context(|| format!("parsing session at {}", path.display()))?;
 
@@ -132,14 +160,33 @@ impl Store {
             .ok_or_else(|| anyhow!("session path has no parent"))?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
-        let body = serde_json::to_string_pretty(state).context("serialising session")?;
+        // Compact rather than pretty. Whitespace is nearly free once gzipped,
+        // but it is not free to produce, and `zcat state.json.gz | jq` reads
+        // this better than the pretty printer did.
+        let body = serde_json::to_vec(state).context("serialising session")?;
 
         // Written beside the target and renamed: a run interrupted mid-write
         // would otherwise leave a truncated file, and the next run would report
         // a corrupt session rather than simply an older one.
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
+        let temp = path.with_extension("gz.tmp");
+        let file =
+            std::fs::File::create(&temp).with_context(|| format!("writing {}", temp.display()))?;
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        encoder
+            .write_all(&body)
+            .with_context(|| format!("compressing into {}", temp.display()))?;
+        encoder
+            .finish()
+            .with_context(|| format!("finishing {}", temp.display()))?;
         std::fs::rename(&temp, &path).with_context(|| format!("replacing {}", path.display()))?;
+
+        // Only once the replacement is in place. Removing it earlier would
+        // turn an interrupted save into a lost session rather than an older
+        // one, which is the failure this whole dance exists to avoid.
+        let legacy = self.legacy_path_for(id)?;
+        if legacy.exists() {
+            let _ = std::fs::remove_file(&legacy);
+        }
 
         Ok(path)
     }
@@ -149,6 +196,11 @@ impl Store {
     }
 
     fn path_for(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.dir_for(id)?.join("state.json.gz"))
+    }
+
+    /// Where sessions lived before they were compressed. Read, never written.
+    fn legacy_path_for(&self, id: &str) -> Result<PathBuf> {
         Ok(self.dir_for(id)?.join("state.json"))
     }
 }
@@ -346,6 +398,97 @@ mod tests {
         );
         assert_eq!(read.cookies.len(), 1);
         assert_eq!(read.cookies[0].value, "abc");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_written_before_compression_is_still_readable() {
+        let dir = std::env::temp_dir().join(format!("conduit-legacy-{}", std::process::id()));
+        let store = Store { root: dir.clone() };
+        let session = dir.join("old");
+        std::fs::create_dir_all(&session).unwrap();
+
+        // Exactly what an older conduit left behind: uncompressed, pretty.
+        std::fs::write(
+            session.join("state.json"),
+            serde_json::to_string_pretty(&State {
+                version: FORMAT_VERSION,
+                storage: BTreeMap::from([(
+                    "https://example.com".to_string(),
+                    serde_json::json!({"localStorage": {"token": "kept"}, "databases": []}),
+                )]),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let read = store.load("old").unwrap();
+        assert_eq!(
+            read.storage["https://example.com"]["localStorage"]["token"], "kept",
+            "an upgrade must not silently empty a session"
+        );
+
+        // Saving replaces it, and does not leave the old copy behind to be
+        // read again by a conduit that would then disagree about the contents.
+        store.save("old", &read).unwrap();
+        assert!(session.join("state.json.gz").exists());
+        assert!(!session.join("state.json").exists());
+        assert_eq!(
+            store.load("old").unwrap().storage["https://example.com"]["localStorage"]["token"],
+            "kept"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sessions_are_stored_compressed() {
+        let dir = std::env::temp_dir().join(format!("conduit-gzip-{}", std::process::id()));
+        let store = Store { root: dir.clone() };
+
+        // Shaped like what a page actually writes: many records under long,
+        // repeated keys. This is the case compression is for.
+        let records: Vec<serde_json::Value> = (0..200)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "createdAt": "2026-09-30T00:00:00.000Z",
+                    "updatedAt": "2026-09-30T00:00:00.000Z",
+                    "description": "a note whose text repeats across every record",
+                })
+            })
+            .collect();
+        let state = State {
+            version: FORMAT_VERSION,
+            storage: BTreeMap::from([(
+                "https://example.com".to_string(),
+                serde_json::json!({"localStorage": {}, "databases": [{"name": "notes", "records": records}]}),
+            )]),
+            ..Default::default()
+        };
+
+        store.save("big", &state).unwrap();
+        let path = dir.join("big/state.json.gz");
+        let on_disk = std::fs::metadata(&path).unwrap().len();
+        let uncompressed = serde_json::to_vec(&state).unwrap().len() as u64;
+
+        // Gzip's own framing, so `zcat` and every other tool can read it.
+        let head = std::fs::read(&path).unwrap();
+        assert_eq!(&head[..2], &[0x1f, 0x8b], "not a gzip file");
+
+        assert!(
+            on_disk * 5 < uncompressed,
+            "expected better than 5x on repetitive JSON, got {uncompressed} -> {on_disk}"
+        );
+        assert_eq!(
+            store.load("big").unwrap().storage["https://example.com"]["databases"][0]["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            200
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
