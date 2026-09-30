@@ -1,8 +1,10 @@
 name: release
 
 # A release is cut by the version in Cargo.toml changing on main. Merge a
-# version bump and everything below follows: a tag, binaries for every
-# platform, checksums, a GitHub release, npm packages, and the crate.
+# version bump and everything below follows: the test suite, binaries for every
+# platform, checksums, a tag, a GitHub release, npm packages, and the crate.
+#
+# Nothing is published unless the tests pass on every platform.
 #
 # Not every merge releases — most are README fixes and CI tweaks, and tagging
 # those would be noise. The version bump is the signal.
@@ -75,6 +77,37 @@ jobs:
           echo "release=true" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
+
+
+  # Nothing is published until the suite passes.
+  #
+  # This workflow used to build binaries, check they start, and publish — with
+  # no test run anywhere in it. `main` tests the same commit, but in a separate
+  # workflow that runs concurrently and cannot gate this one, so a release could
+  # and did go out while main was red: v0.2.0 published while the test matrix
+  # had a failing job, and the failure was only noticed afterwards.
+  #
+  # A version cannot be unpublished. That asymmetry is the whole argument for
+  # paying a few minutes here.
+  test:
+    name: test (${{ matrix.os }})
+    needs: verify
+    if: needs.verify.outputs.release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same platforms main tests on. Intel macOS is absent for the same
+        # reason it is there: the runners queue for many minutes. The release
+        # still builds and runs that binary before packaging it.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
 
 
   build:
@@ -154,7 +187,7 @@ jobs:
 
   publish:
     name: publish release
-    needs: [verify, build]
+    needs: [verify, build, test]
     if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -224,7 +257,7 @@ jobs:
     # a binary having been produced — but it does wait for them anyway, because
     # publishing a version that then fails to build for a platform is worse
     # than publishing a minute later.
-    needs: [verify, build]
+    needs: [verify, build, test]
     if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -267,7 +300,7 @@ jobs:
 
   npm:
     name: publish to npm
-    needs: [verify, build]
+    needs: [verify, build, test]
     if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:

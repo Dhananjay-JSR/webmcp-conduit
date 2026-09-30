@@ -141,6 +141,19 @@ Each target builds on a native runner and every binary is run — `--version`
 and a real probe against a fixture — before it is packaged, so a release
 cannot contain something that does not work.
 
+The suite also runs inside the release, on every platform, and nothing is
+published unless it passes. That looks redundant next to `main`, which tests
+the same commit, and is not: the two workflows run concurrently and neither can
+gate the other. v0.2.0 published while `main` was red, and the failure was only
+noticed afterwards. A version cannot be unpublished, which is the whole
+argument for paying those minutes twice.
+
+A pull request is tested as **merged**, not as a branch — GitHub builds
+`refs/pull/N/merge` and CI checks that out — so the run answers "does main
+still work with this in it". The answer goes stale if main moves afterwards;
+requiring branches to be up to date before merging is what closes that, and it
+is a repository setting rather than anything in these files.
+
 ### Publishing
 
 Two registries, both published by the same version bump, and both skipped with
