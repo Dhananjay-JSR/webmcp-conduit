@@ -242,13 +242,17 @@ async fn run() -> Result<()> {
                 }
                 if session_id.is_some() {
                     anyhow::bail!(
-                        "`--session` belongs to `--transport stdio`. Over HTTP the \
-                         mount is the session, so the caller cannot choose one: \
-                         `--site alice=<url>` serves session `alice` at /alice"
+                        "`--session` belongs to `--transport stdio`. Over HTTP a \
+                         caller names their own with `?session=<secret>` per \
+                         request"
                     );
                 }
-                if sites.is_empty() {
-                    anyhow::bail!("`--transport http` needs at least one `--site <name>=<url>`");
+                if sites.is_empty() && !allow_any_site {
+                    anyhow::bail!(
+                        "`--transport http` needs something to serve: either \
+                         `--site <name>=<url>`, or `--allow-any-site` to let \
+                         callers name pages at /connect?url="
+                    );
                 }
 
                 let addr: std::net::SocketAddr = bind
