@@ -157,24 +157,6 @@ It also distinguishes a page that never looked for `document.modelContext`
 from one that looked and never registered, and from one that only *consumes*
 tools — for which an empty list is the correct answer.
 
-## What it is not
-
-`conduit` is not a browser. There is no layout engine and no GPU:
-`getBoundingClientRect` returns zeros and `canvas.getContext('webgl')` returns
-null. A page that renders through WebGL, or gates registration behind real
-geometry, will come up empty — and `probe` will say so.
-
-Known gaps:
-
-- **WebGL and WebGPU** are unavailable.
-- **Authenticated sessions.** No cookie jar yet, so logged-in sites see you
-  logged out.
-- **Angular and other framework runtimes** are untested. React, including
-  React Server Components, works.
-
-Very few sites ship WebMCP today. This is infrastructure for a standard that
-is still arriving.
-
 ## Scope
 
 `conduit` targets the **W3C WebMCP specification** — `document.modelContext`,
