@@ -1,8 +1,10 @@
 name: release
 
 # A release is cut by the version in Cargo.toml changing on main. Merge a
-# version bump and everything below follows: a tag, binaries for every
-# platform, checksums, a GitHub release, and npm packages.
+# version bump and everything below follows: the test suite, binaries for every
+# platform, checksums, a tag, a GitHub release, npm packages, and the crate.
+#
+# Nothing is published unless the tests pass on every platform.
 #
 # Not every merge releases — most are README fixes and CI tweaks, and tagging
 # those would be noise. The version bump is the signal.
@@ -75,6 +77,37 @@ jobs:
           echo "release=true" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
+
+
+  # Nothing is published until the suite passes.
+  #
+  # This workflow used to build binaries, check they start, and publish — with
+  # no test run anywhere in it. `main` tests the same commit, but in a separate
+  # workflow that runs concurrently and cannot gate this one, so a release could
+  # and did go out while main was red: v0.2.0 published while the test matrix
+  # had a failing job, and the failure was only noticed afterwards.
+  #
+  # A version cannot be unpublished. That asymmetry is the whole argument for
+  # paying a few minutes here.
+  test:
+    name: test (${{ matrix.os }})
+    needs: verify
+    if: needs.verify.outputs.release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same platforms main tests on. Intel macOS is absent for the same
+        # reason it is there: the runners queue for many minutes. The release
+        # still builds and runs that binary before packaging it.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
 
 
   build:
@@ -154,7 +187,7 @@ jobs:
 
   publish:
     name: publish release
-    needs: [verify, build]
+    needs: [verify, build, test]
     if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -218,9 +251,56 @@ jobs:
   # packages as optionalDependencies, which is how esbuild and swc do it. npm
   # installs only the package matching the machine and downloads nothing at
   # install time.
+  crates:
+    name: publish to crates.io
+    # Not gated on `build`. The crate is source, so nothing about it depends on
+    # a binary having been produced — but it does wait for them anyway, because
+    # publishing a version that then fails to build for a platform is worse
+    # than publishing a minute later.
+    needs: [verify, build, test]
+    if: needs.verify.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set — nothing was published to crates.io."
+            echo "Add a CARGO_REGISTRY_TOKEN repository secret to publish on the next release."
+            {
+              echo "### crates.io publish skipped"
+              echo ""
+              echo "\`CARGO_REGISTRY_TOKEN\` is not set, so the crate was not published."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Already on crates.io is success, not failure: a re-run of a release
+          # should not fail on its second attempt, and a version can only ever
+          # be published once.
+          #
+          # The registry is asked directly rather than inferring from a dry run,
+          # which skips the upload and so never notices a version already
+          # exists. crates.io requires a User-Agent.
+          version="${{ needs.verify.outputs.version }}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: webmcp-conduit release workflow' \
+            "https://crates.io/api/v1/crates/webmcp-conduit/$version")
+
+          if [ "$status" = "200" ]; then
+            echo "webmcp-conduit $version is already on crates.io; nothing to do."
+            exit 0
+          fi
+
+          cargo publish
+
   npm:
     name: publish to npm
-    needs: [verify, build]
+    needs: [verify, build, test]
     if: needs.verify.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
