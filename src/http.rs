@@ -187,6 +187,22 @@ fn validate_target(target: &str, config: &Config) -> Result<()> {
         .ok_or_else(|| anyhow!("`url` has no host"))?
         .to_ascii_lowercase();
 
+    // Link-local stays refused even here. The flag exists to reach a service on
+    // your own machine or network; 169.254.169.254 is a cloud metadata endpoint
+    // and never a development target, so permitting it as a side effect of
+    // wanting localhost would be the most useful thing the flag could leak.
+    let link_local = match url.host() {
+        Some(url::Host::Ipv4(v4)) => v4.is_link_local(),
+        Some(url::Host::Ipv6(v6)) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        _ => false,
+    };
+    if link_local {
+        return Err(anyhow!(
+            "refusing to reach the link-local address {host}: that range holds \
+             cloud metadata services, and --allow-private-sites does not cover it"
+        ));
+    }
+
     if config.allow_private_sites {
         return Ok(());
     }
@@ -304,7 +320,8 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
         eprintln!("conduit:   POST /connect?url=<site>");
     }
     eprintln!(
-        "conduit: every request needs ?session=<random-string>; it is a credential, not a name"
+        "conduit: each connection gets its own page; add ?session=<secret> to keep one \
+         across connections"
     );
 
     loop {
@@ -657,6 +674,22 @@ mod tests {
         assert!(refuse("gopher://example.com/"));
 
         assert!(validate_target("https://example.com/app", &open()).is_ok());
+    }
+
+    #[test]
+    fn metadata_endpoints_stay_refused_even_when_private_ones_are_allowed() {
+        let permissive = Config {
+            allow_private_sites: true,
+            ..open()
+        };
+        // The flag is for reaching a development server. Cloud metadata is
+        // never that, and getting it for free would be the most useful thing
+        // the flag could leak.
+        assert!(validate_target("http://169.254.169.254/latest/meta-data/", &permissive).is_err());
+        assert!(validate_target("http://[fe80::1]/", &permissive).is_err());
+        // What the flag is actually for still works.
+        assert!(validate_target("http://127.0.0.1:8931/", &permissive).is_ok());
+        assert!(validate_target("http://192.168.1.10/", &permissive).is_ok());
     }
 
     #[test]

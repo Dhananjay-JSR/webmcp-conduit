@@ -134,9 +134,12 @@ whoever knows it gets whatever it is signed into, so it should be random.
 Off unless asked for:
 
 ```
-conduit serve --transport http --allow-any-site --site notes=https://example.com
+conduit serve --transport http --allow-any-site
 POST /connect?url=https%3A%2F%2Fexample.com%2Fapp
 ```
+
+Declared sites are optional once this is on, so a deployment that only ever
+takes `/connect?url=` needs no `--site` at all.
 
 The engine will load a page it was not configured with, which is a capability
 and not a permission: it refuses `file://`, loopback, private networks,
