@@ -20,6 +20,11 @@ conduit serve https://example.com
 The client on the other end has never heard of WebMCP. No widget on the page,
 no token to paste, no separate client to install.
 
+For why this exists rather than how to use it, there is a writeup:
+[The Missing Bridge Between WebMCP and MCP](https://www.dhananjaay.dev/posts/bridging-webmcp-and-mcp).
+It covers what the gap is, why running the page is the only way across it, and
+what that costs.
+
 ## Install
 
 ```bash
