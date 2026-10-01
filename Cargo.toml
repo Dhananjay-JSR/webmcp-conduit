@@ -5,6 +5,7 @@ edition = "2021"
 description = "Turn any WebMCP-enabled website into a standard MCP server. No browser required."
 license = "Apache-2.0"
 repository = "https://github.com/Dhananjay-JSR/webmcp-conduit"
+homepage = "https://www.dhananjaay.dev/posts/bridging-webmcp-and-mcp"
 readme = "README.md"
 keywords = ["mcp", "webmcp", "ai", "agent", "mcp-server"]
 categories = ["command-line-utilities", "web-programming"]
