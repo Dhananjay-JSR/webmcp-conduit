@@ -36,6 +36,9 @@ getrandom = "0.4.3"
 rmcp = { version = "3.5.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 tower-service = "0.3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 opt-level = "z"
 lto = true

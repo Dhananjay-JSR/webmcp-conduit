@@ -150,7 +150,18 @@ jobs:
         run: |
           bin="target/${{ matrix.target }}/release/${BINARY}${{ matrix.ext }}"
           "$bin" --version
-          "$bin" probe fixtures/todo.html | grep -q "tools: 4"
+
+          # Captured rather than piped into `grep -q`. `grep -q` exits on the
+          # first match and closes the pipe, so this assertion used to depend
+          # on whether conduit had finished writing by then — it lost that race
+          # on an arm64 macOS runner and failed a release.
+          out=$("$bin" probe fixtures/todo.html)
+          echo "$out" | grep -q "tools: 4"
+
+          # And now the behaviour itself, deliberately: a reader that goes away
+          # early must not crash the process. `head` is what anyone would
+          # actually type, and Rust ignores SIGPIPE unless told otherwise.
+          "$bin" probe fixtures/todo.html | head -1 > /dev/null
 
       - name: Check it is the right architecture
         if: matrix.target == 'x86_64-apple-darwin'
