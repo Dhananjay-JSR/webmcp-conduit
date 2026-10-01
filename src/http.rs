@@ -539,6 +539,136 @@ fn relax_future_protocol_header(req: &mut Request<Full<Bytes>>) {
     req.headers_mut().remove("mcp-protocol-version");
 }
 
+/// How long a client may reuse a tool list before asking again.
+///
+/// Short, because the list is not static the way a conventional server's is:
+/// it comes from a live page, and a page can register or withdraw tools at any
+/// time. A minute is long enough to stop a client re-listing around every call
+/// and short enough that a page which changes its mind is not misrepresented
+/// for long.
+const TOOL_LIST_TTL_MS: u64 = 60_000;
+
+/// Add the SEP-2549 cache hints that 2026-07-28 requires on list results.
+///
+/// The spec makes `ttlMs` and `cacheScope` mandatory on the results of
+/// `tools/list`, `prompts/list`, `resources/list`, `resources/read` and
+/// `resources/templates/list`. rmcp 3.5.0 does not emit them, so a client
+/// holding the server to that revision rejects a perfectly good tool list:
+///
+///   Invalid result for tools/list: [ { expected: "number", path: ["ttlMs"] },
+///                                    { path: ["cacheScope"] } ]
+///
+/// Claude Code does this. The fields are added here rather than waiting for the
+/// SDK because without them conduit cannot be used from the client most people
+/// will reach for.
+///
+/// `private` is not a default chosen for caution alone. A session can be signed
+/// in, and a signed-in page may register tools an anonymous visitor never sees,
+/// so a shared cache serving one caller's tool list to another would be a real
+/// leak rather than a theoretical one.
+async fn add_cache_hints(response: Response<BoxBody>) -> Result<Response<BoxBody>> {
+    let (parts, body) = response.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(Response::from_parts(parts, boxed(bytes)));
+    };
+
+    let rewritten = rewrite_list_results(text);
+    let bytes = match rewritten {
+        Some(text) => Bytes::from(text),
+        None => bytes,
+    };
+
+    let mut parts = parts;
+    // The body length changed, and a stale `content-length` is worse than none.
+    parts.headers.remove("content-length");
+    Ok(Response::from_parts(parts, boxed(bytes)))
+}
+
+fn boxed(bytes: Bytes) -> BoxBody {
+    BodyExt::boxed(Full::new(bytes).map_err(|never| match never {}))
+}
+
+/// Walk a response body — SSE frames or bare JSON — adding cache hints to any
+/// list result that lacks them. Returns `None` when nothing needed changing,
+/// so the untouched bytes can be passed through as they arrived.
+fn rewrite_list_results(body: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out = String::with_capacity(body.len() + 64);
+
+    for (i, line) in body.split_inclusive('\n').enumerate() {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let (prefix, payload) = match trimmed.strip_prefix("data:") {
+            Some(rest) => ("data:", rest),
+            // A body that is not SSE at all is a single JSON document.
+            None if i == 0 && trimmed.starts_with('{') => ("", trimmed),
+            None => {
+                out.push_str(line);
+                continue;
+            }
+        };
+
+        let Some(mut value) = serde_json::from_str::<Value>(payload.trim()).ok() else {
+            out.push_str(line);
+            continue;
+        };
+
+        if !add_hints_to(&mut value) {
+            out.push_str(line);
+            continue;
+        }
+
+        changed = true;
+        let ending = &line[trimmed.len()..];
+        out.push_str(prefix);
+        if !prefix.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&value.to_string());
+        out.push_str(ending);
+    }
+
+    changed.then_some(out)
+}
+
+/// True when this message was a list result and hints were added.
+fn add_hints_to(message: &mut Value) -> bool {
+    let Some(result) = message.get_mut("result").and_then(Value::as_object_mut) else {
+        return false;
+    };
+
+    // Identified by shape rather than by remembering which id asked what: these
+    // keys are exactly the results SEP-2549 covers.
+    let is_list = [
+        "tools",
+        "prompts",
+        "resources",
+        "resourceTemplates",
+        "contents",
+    ]
+    .iter()
+    .any(|key| result.contains_key(*key));
+    if !is_list {
+        return false;
+    }
+
+    let mut added = false;
+    if !result.contains_key("ttlMs") {
+        result.insert("ttlMs".into(), json!(TOOL_LIST_TTL_MS));
+        added = true;
+    }
+    if !result.contains_key("cacheScope") {
+        result.insert("cacheScope".into(), json!("private"));
+        added = true;
+    }
+    added
+}
+
 async fn buffer(req: Request<hyper::body::Incoming>) -> Result<Request<Full<Bytes>>> {
     let (parts, body) = req.into_parts();
     let bytes = body.collect().await?.to_bytes();
@@ -674,6 +804,8 @@ async fn connect(
         .await
         .map_err(|e| anyhow!("streamable http transport: {e}"))?;
 
+    let response = add_cache_hints(response).await?;
+
     tracing::debug!(
         target: "http",
         "-> {} {}",
@@ -742,6 +874,64 @@ mod tests {
             builder = builder.header("MCP-Protocol-Version", version);
         }
         builder.body(Full::new(Bytes::new())).unwrap()
+    }
+
+    #[test]
+    fn a_tool_list_carries_the_cache_hints_2026_07_28_requires() {
+        let frame = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":",
+            "[{\"name\":\"example__search\"}]}}\n\n"
+        );
+        let out = rewrite_list_results(frame).expect("a tool list should be rewritten");
+        let payload: Value = serde_json::from_str(
+            out.lines()
+                .next()
+                .unwrap()
+                .trim_start_matches("data:")
+                .trim(),
+        )
+        .unwrap();
+
+        assert_eq!(payload["result"]["ttlMs"], json!(TOOL_LIST_TTL_MS));
+        assert_eq!(payload["result"]["cacheScope"], json!("private"));
+        // The tools themselves must survive the trip unchanged.
+        assert_eq!(payload["result"]["tools"][0]["name"], "example__search");
+        // SSE framing is load-bearing: the blank line terminates the event.
+        assert!(out.ends_with("\n\n"), "frame separator was lost: {out:?}");
+    }
+
+    #[test]
+    fn a_plain_json_body_gets_them_too() {
+        let body = r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#;
+        let out = rewrite_list_results(body).expect("plain JSON should be rewritten");
+        let payload: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(payload["result"]["cacheScope"], json!("private"));
+    }
+
+    #[test]
+    fn anything_that_is_not_a_list_is_left_alone() {
+        // A tool call, an error, and the initialize result are all untouched —
+        // SEP-2549 covers list results, and inventing fields elsewhere would
+        // be its own interop bug.
+        for body in [
+            r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text"}],"isError":false}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"nope"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25"}}"#,
+        ] {
+            assert!(
+                rewrite_list_results(body).is_none(),
+                "should not have been rewritten: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn hints_the_sdk_already_sent_are_not_overwritten() {
+        // When rmcp grows SEP-2549 support this stops doing anything, which is
+        // how it should retire: silently, without a second opinion on the wire.
+        let body =
+            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[],"ttlMs":5,"cacheScope":"public"}}"#;
+        assert!(rewrite_list_results(body).is_none());
     }
 
     #[test]
