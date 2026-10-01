@@ -237,11 +237,8 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
             ```
 
-            Or run it without installing:
-
-            ```bash
-            npx webmcp-conduit probe https://example.com
-            ```
+            The installer resolves the latest release, picks the archive
+            for your platform, and checks it against `SHA256SUMS`.
 
             Or from source:
 
