@@ -144,7 +144,36 @@ enum Command {
 /// runs on a thread we size ourselves.
 pub const ENGINE_STACK: usize = 256 * 1024 * 1024;
 
+/// Die quietly when the reader goes away, the way every other Unix tool does.
+///
+/// Rust sets `SIGPIPE` to `SIG_IGN` before `main`, so writing to a closed pipe
+/// returns `EPIPE` instead of killing the process — and `println!` panics on an
+/// error it cannot report. That turns the most ordinary thing anyone does with
+/// a CLI into a crash:
+///
+///   $ conduit probe https://example.com | head -5
+///   thread 'conduit-engine' panicked: failed printing to stdout: Broken pipe
+///
+/// `head` closes the pipe once it has its five lines, which is correct and
+/// expected. conduit should stop, not panic. Restoring the default handler
+/// gives exactly that: the process dies on the signal, silently, with nothing
+/// printed to a terminal nobody is reading.
+#[cfg(unix)]
+fn restore_default_sigpipe() {
+    // Safety: called once, before any thread is spawned, with a constant
+    // handler. Resetting a signal to its default disposition cannot fail in a
+    // way worth checking.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_default_sigpipe() {}
+
 fn main() -> Result<()> {
+    restore_default_sigpipe();
+
     std::thread::Builder::new()
         .name("conduit-engine".into())
         .stack_size(ENGINE_STACK)
